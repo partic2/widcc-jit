@@ -72,6 +72,7 @@ typedef struct {
   HashEntry *buckets;
   int capacity;
   int used;
+  bool heap; // buckets are malloc'd (outlive the compiler arena)
 } HashMap;
 
 // The runtime is built as a single translation unit (src/all.c); every
@@ -82,8 +83,8 @@ static void hashmap_put(HashMap *map, char *key, void *val);
 static void hashmap_put2(HashMap *map, char *key, int keylen, void *val);
 static void hashmap_delete(HashMap *map, char *key);
 static void hashmap_delete2(HashMap *map, char *key, int keylen);
-static int hashmap_size(HashMap *map);
-static void hashmap_keys(HashMap *map, char **keys);
+static void hashmap_init_heap(HashMap *map);
+static void hashmap_destroy(HashMap *map);
 
 
 //

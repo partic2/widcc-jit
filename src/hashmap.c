@@ -27,6 +27,15 @@ static uint64_t fnv_hash(char *s, int len) {
   return hash;
 }
 
+static void *hashmap_alloc_buckets(HashMap *map, int cap) {
+  if (!map->heap)
+    return cc_calloc(cap, sizeof(HashEntry));
+  void *p = calloc(cap, sizeof(HashEntry));
+  if (!p)
+    error("out of memory");
+  return p;
+}
+
 // Make room for new entires in a given hashmap by removing
 // tombstones and possibly extending the bucket size.
 static void rehash(HashMap *map) {
@@ -43,8 +52,9 @@ static void rehash(HashMap *map) {
 
   // Create a new hashmap and copy all key-values.
   HashMap map2 = {0};
-  map2.buckets = cc_calloc(cap, sizeof(HashEntry));
+  map2.heap = map->heap;
   map2.capacity = cap;
+  map2.buckets = hashmap_alloc_buckets(&map2, cap);
 
   for (int i = 0; i < map->capacity; i++) {
     HashEntry *ent = &map->buckets[i];
@@ -53,6 +63,8 @@ static void rehash(HashMap *map) {
   }
 
   assert(map2.used == nkeys);
+  if (map->heap)
+    free(map->buckets);
   *map = map2;
 }
 
@@ -79,7 +91,7 @@ static HashEntry *get_entry(HashMap *map, char *key, int keylen) {
 
 static HashEntry *get_or_insert_entry(HashMap *map, char *key, int keylen) {
   if (!map->buckets) {
-    map->buckets = cc_calloc(INIT_SIZE, sizeof(HashEntry));
+    map->buckets = hashmap_alloc_buckets(map, INIT_SIZE);
     map->capacity = INIT_SIZE;
   } else if ((map->used * 100) / map->capacity >= HIGH_WATERMARK) {
     rehash(map);
@@ -131,18 +143,16 @@ static void hashmap_delete2(HashMap *map, char *key, int keylen) {
     ent->key = TOMBSTONE;
 }
 
-static int hashmap_size(HashMap *map) {
-  return map->used;
+// A heap-mode map owns its bucket array and survives the compiler arena.
+static void hashmap_init_heap(HashMap *map) {
+  memset(map, 0, sizeof(*map));
+  map->heap = true;
 }
 
-static void hashmap_keys(HashMap *map, char **keys) {
-  int nkeys = 0;
-  for (int i = 0; i < map->capacity; i++) {
-    HashEntry *ent = &map->buckets[i];
-    if (ent->key && ent->key != TOMBSTONE) {
-      keys[nkeys++] = ent->key;
-    }
-  }
+static void hashmap_destroy(HashMap *map) {
+  if (map->heap)
+    free(map->buckets);
+  memset(map, 0, sizeof(*map));
 }
 
 

@@ -1,11 +1,20 @@
 #include "widcc_jit.h"
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#define CK(jit, name, src) do { \
-  if (widcc_jit_compile(jit, name, src) != 0) { \
-    fprintf(stderr, "compile %s failed: %s\n", name, widcc_jit_error(jit)); \
+// Always-evaluated check: unlike assert(), it survives -DNDEBUG.
+#define CHECK(expr)                                                         \
+  do {                                                                      \
+    if (!(expr)) {                                                          \
+      fprintf(stderr, "check failed at %s:%d: %s\n", __FILE__, __LINE__,    \
+              #expr);                                                       \
+      exit(1);                                                              \
+    }                                                                       \
+  } while (0)
+
+#define CK(cc, name, src) do { \
+  if (widcc_cc_compile(cc, name, src) != 0) { \
+    fprintf(stderr, "compile %s failed: %s\n", name, widcc_cc_error(cc)); \
     exit(1); \
   } \
 } while (0)
@@ -14,32 +23,34 @@ static int add3(int a, int b, int c) { return a + b + c; }
 static double dadd(double a, double b) { return a + b; }
 
 int main(void) {
-  WidccJIT *jit = widcc_jit_new();
-  widcc_jit_map_symbol(jit, "add3", (void *)add3);
-  widcc_jit_map_symbol(jit, "dadd", (void *)dadd);
+  WidccRT *rt = widcc_rt_new();
+  WidccCompiler *cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
+  CHECK(widcc_rt_add_func(rt, "add3", (void *)add3) == 0);
+  CHECK(widcc_rt_add_func(rt, "dadd", (void *)dadd) == 0);
 
   // Deep integer nesting: forces many simultaneous live values -> spills.
-  CK(jit, "deep.c",
+  CK(cc, "deep.c",
     "int deep(int a,int b,int c,int d){\n"
     "  return (a+b)*(c+d) + (a-b)*(c-d) + (a*c)-(b*d) + (a+d)*(b+c);\n"
     "}\n"
     "int deep2(int x){\n"
     "  return ((((x+1)*(x+2))+((x+3)*(x+4)))*(((x+5)*(x+6))+((x+7)*(x+8))));\n"
     "}\n");
-  int (*deep)(int,int,int,int) = widcc_jit_symbol(jit, "deep");
-  int (*deep2)(int) = widcc_jit_symbol(jit, "deep2");
+  int (*deep)(int,int,int,int) = widcc_rt_lookup(rt, "deep");
+  int (*deep2)(int) = widcc_rt_lookup(rt, "deep2");
   for (int a=-3;a<=3;a++) for(int b=-2;b<=2;b++){
     int c=a+1,d=b-1;
     int expect=(a+b)*(c+d)+(a-b)*(c-d)+(a*c)-(b*d)+(a+d)*(b+c);
-    assert(deep(a,b,c,d)==expect);
+    CHECK(deep(a,b,c,d)==expect);
   }
   for(int x=-4;x<=4;x++){
     int e=((((x+1)*(x+2))+((x+3)*(x+4)))*(((x+5)*(x+6))+((x+7)*(x+8))));
-    assert(deep2(x)==e);
+    CHECK(deep2(x)==e);
   }
 
   // Call with many live values across it (spill_all + lazy reload).
-  CK(jit, "call.c",
+  CK(cc, "call.c",
     "int add3(int,int,int);\n"
     "double dadd(double,double);\n"
     "int callmid(int a,int b,int c,int d){\n"
@@ -48,22 +59,22 @@ int main(void) {
     "double dcall(double a,double b,double c){\n"
     "  return (a*b) + dadd(a,b) + (b*c) + dadd(b,c) + (a-c);\n"
     "}\n");
-  int (*callmid)(int,int,int,int) = widcc_jit_symbol(jit, "callmid");
-  double (*dcall)(double,double,double) = widcc_jit_symbol(jit, "dcall");
+  int (*callmid)(int,int,int,int) = widcc_rt_lookup(rt, "callmid");
+  double (*dcall)(double,double,double) = widcc_rt_lookup(rt, "dcall");
   for(int a=1;a<=3;a++)for(int b=1;b<=3;b++){
     int c=a+b,d=b+1;
     int expect=(a+b)+add3(a,b,c)+(c*d)+add3(b,c,d)+(a-d);
-    assert(callmid(a,b,c,d)==expect);
+    CHECK(callmid(a,b,c,d)==expect);
   }
   for(int a=1;a<=3;a++){
     double x=a*0.5,y=a+0.25,z=a-0.75;
     double expect=(x*y)+dadd(x,y)+(y*z)+dadd(y,z)+(x-z);
     double got=dcall(x,y,z);
-    assert(got==expect);
+    CHECK(got==expect);
   }
 
   // Mixed float/int comparisons and casts, immediate folding.
-  CK(jit, "mix.c",
+  CK(cc, "mix.c",
     "int mix(int x,double d){\n"
     "  int r=0;\n"
     "  if (d>0.5) r+=1;\n"
@@ -74,18 +85,18 @@ int main(void) {
     "  return r;\n"
     "}\n"
     "double fbin(double a,double b){ return (a+b)*(a-b)/(a+1.0); }\n");
-  int (*mix)(int,double) = widcc_jit_symbol(jit, "mix");
-  double (*fbin)(double,double) = widcc_jit_symbol(jit, "fbin");
-  assert(mix(3,1.5)==(1+2+1+10));
-  assert(mix(2,0.25)==(0+0+4+0+20));
+  int (*mix)(int,double) = widcc_rt_lookup(rt, "mix");
+  double (*fbin)(double,double) = widcc_rt_lookup(rt, "fbin");
+  CHECK(mix(3,1.5)==(1+2+1+10));
+  CHECK(mix(2,0.25)==(0+0+4+0+20));
   for(int a=2;a<=5;a++){
     double x=a,y=a-1;
     double expect=(x+y)*(x-y)/(x+1.0);
-    assert(fbin(x,y)==expect);
+    CHECK(fbin(x,y)==expect);
   }
 
   // Struct assignment with live values around it.
-  CK(jit, "struct.c",
+  CK(cc, "struct.c",
     "struct P{int x;int y;int z;};\n"
     "int st(int a,int b){\n"
     "  struct P p,q;\n"
@@ -93,12 +104,12 @@ int main(void) {
     "  q=p;\n"
     "  return (q.x+q.y+q.z) + (a*b);\n"
     "}\n");
-  int (*st)(int,int) = widcc_jit_symbol(jit, "st");
+  int (*st)(int,int) = widcc_rt_lookup(rt, "st");
   for(int a=1;a<=4;a++)for(int b=1;b<=4;b++)
-    assert(st(a,b)==(a+b+(a+b))+(a*b));
+    CHECK(st(a,b)==(a+b+(a+b))+(a*b));
 
   // Logical short-circuit with side effects and live values.
-  CK(jit, "logic.c",
+  CK(cc, "logic.c",
     "int g;\n"
     "int bump(void){ g++; return 1; }\n"
     "int lg(int a,int b){\n"
@@ -106,31 +117,31 @@ int main(void) {
     "  int r = (a>0 && bump()) + (b>0 || bump());\n"
     "  return r*100+g;\n"
     "}\n");
-  int (*lg)(int,int) = widcc_jit_symbol(jit, "lg");
-  assert(lg(1,1)==2*100+1);
-  assert(lg(0,0)==1*100+1);
-  assert(lg(1,0)==2*100+2);
-  assert(lg(0,1)==1*100+0);
+  int (*lg)(int,int) = widcc_rt_lookup(rt, "lg");
+  CHECK(lg(1,1)==2*100+1);
+  CHECK(lg(0,0)==1*100+1);
+  CHECK(lg(1,0)==2*100+2);
+  CHECK(lg(0,1)==1*100+0);
 
   // Loop with a call and spilled accumulators.
-  CK(jit, "loop.c",
+  CK(cc, "loop.c",
     "int add3(int,int,int);\n"
     "int lp(int n){\n"
     "  int s=0,p=1;\n"
     "  for(int i=0;i<n;i++){ s+=add3(i,i+1,i+2); p*=2; }\n"
     "  return s+p;\n"
     "}\n");
-  int (*lp)(int) = widcc_jit_symbol(jit, "lp");
+  int (*lp)(int) = widcc_rt_lookup(rt, "lp");
   for(int n=0;n<=6;n++){
     int s=0,p=1;
     for(int i=0;i<n;i++){s+=add3(i,i+1,i+2);p*=2;}
-    assert(lp(n)==s+p);
+    CHECK(lp(n)==s+p);
   }
 
   // Huffman coding: build the tree, derive codes, encode a message,
   // decode it back, and check the weighted path length (CLRS frequencies
   // {45,13,12,16,9,5} have optimal WPL 224).
-  CK(jit, "huffman.c",
+  CK(cc, "huffman.c",
     "int huffman(void){\n"
     "  int freq[6];\n"
     "  freq[0]=45; freq[1]=13; freq[2]=12; freq[3]=16; freq[4]=9; freq[5]=5;\n"
@@ -187,11 +198,11 @@ int main(void) {
     "  if (nd!=20 || node!=root) return 3;\n"
     "  return 0;\n"
     "}\n");
-  int (*huffman)(void) = widcc_jit_symbol(jit, "huffman");
-  assert(huffman() == 0);
+  int (*huffman)(void) = widcc_rt_lookup(rt, "huffman");
+  CHECK(huffman() == 0);
 
   // Recursive Hoare quicksort + lower-bound binary search.
-  CK(jit, "sort.c",
+  CK(cc, "sort.c",
     "void qs(int *a,int lo,int hi){\n"
     "  if (hi-lo<2) return;\n"
     "  int mid=lo+(hi-lo)/2;\n"
@@ -215,8 +226,8 @@ int main(void) {
     "  if (lo<n && a[lo]==x) return lo;\n"
     "  return -1;\n"
     "}\n");
-  void (*qs)(int *, int, int) = widcc_jit_symbol(jit, "qs");
-  int (*lb)(int *, int, int) = widcc_jit_symbol(jit, "lb");
+  void (*qs)(int *, int, int) = widcc_rt_lookup(rt, "qs");
+  int (*lb)(int *, int, int) = widcc_rt_lookup(rt, "lb");
   {
     int arr[200];
     unsigned seed = 12345;
@@ -229,20 +240,20 @@ int main(void) {
     qs(arr, 0, 200);
     long sum1 = 0;
     for (int i = 0; i < 200; i++) {
-      if (i > 0) assert(arr[i - 1] <= arr[i]);
+      if (i > 0) CHECK(arr[i - 1] <= arr[i]);
       sum1 += arr[i];
     }
-    assert(sum0 == sum1);
+    CHECK(sum0 == sum1);
     for (int i = 0; i < 200; i += 17) {
       int idx = lb(arr, 200, arr[i]);
-      assert(idx >= 0 && arr[idx] == arr[i]);
-      assert(idx == 0 || arr[idx - 1] < arr[i]);
+      CHECK(idx >= 0 && arr[idx] == arr[i]);
+      CHECK(idx == 0 || arr[idx - 1] < arr[i]);
     }
-    assert(lb(arr, 200, 1000) == -1);
+    CHECK(lb(arr, 200, 1000) == -1);
   }
 
   // Sieve of Eratosthenes: pi(1000) = 168.
-  CK(jit, "sieve.c",
+  CK(cc, "sieve.c",
     "int primes(int n){\n"
     "  int flag[1000];\n"
     "  for (int i=0;i<n;i++) flag[i]=1;\n"
@@ -254,13 +265,13 @@ int main(void) {
     "  for (int i=0;i<n;i++) c+=flag[i];\n"
     "  return c;\n"
     "}\n");
-  int (*primes)(int) = widcc_jit_symbol(jit, "primes");
-  assert(primes(1000) == 168);
-  assert(primes(100) == 25);
-  assert(primes(2) == 0);
+  int (*primes)(int) = widcc_rt_lookup(rt, "primes");
+  CHECK(primes(1000) == 168);
+  CHECK(primes(100) == 25);
+  CHECK(primes(2) == 0);
 
   // 8x8 integer matrix product through flat pointers.
-  CK(jit, "matmul.c",
+  CK(cc, "matmul.c",
     "void mmul(int *a,int *b,int *c,int n){\n"
     "  for (int i=0;i<n;i++)\n"
     "    for (int j=0;j<n;j++){\n"
@@ -269,7 +280,7 @@ int main(void) {
     "      c[i*n+j]=s;\n"
     "    }\n"
     "}\n");
-  void (*mmul)(int *, int *, int *, int) = widcc_jit_symbol(jit, "mmul");
+  void (*mmul)(int *, int *, int *, int) = widcc_rt_lookup(rt, "mmul");
   {
     int a[64], b[64], c[64];
     for (int i = 0; i < 64; i++) { a[i] = i % 7 - 3; b[i] = (i * 3) % 5 - 2; }
@@ -278,12 +289,12 @@ int main(void) {
       for (int j = 0; j < 8; j++) {
         int s = 0;
         for (int k = 0; k < 8; k++) s += a[i * 8 + k] * b[k * 8 + j];
-        assert(c[i * 8 + j] == s);
+        CHECK(c[i * 8 + j] == s);
       }
   }
 
   // Sorted linked list over a static node pool, then in-place reversal.
-  CK(jit, "list.c",
+  CK(cc, "list.c",
     "struct Node { int val; struct Node *next; };\n"
     "struct Node pool[64];\n"
     "int used;\n"
@@ -325,30 +336,31 @@ int main(void) {
     "  if (i!=8 || used!=8) return 2;\n"
     "  return 0;\n"
     "}\n");
-  int (*list_check)(void) = widcc_jit_symbol(jit, "list_check");
-  assert(list_check() == 0);
+  int (*list_check)(void) = widcc_rt_lookup(rt, "list_check");
+  CHECK(list_check() == 0);
 
   // Newton-Raphson square root: float division/multiplication in a loop.
-  CK(jit, "sqrt.c",
+  CK(cc, "sqrt.c",
     "double dsqrt(double x){\n"
     "  if (x<=0.0) return 0.0;\n"
     "  double r=x;\n"
     "  for (int i=0;i<40;i++) r=(r+x/r)*0.5;\n"
     "  return r;\n"
     "}\n");
-  double (*dsqrt)(double) = widcc_jit_symbol(jit, "dsqrt");
+  double (*dsqrt)(double) = widcc_rt_lookup(rt, "dsqrt");
   {
     double xs[] = {2.0, 0.25, 100.0, 1e-6};
     for (int i = 0; i < 4; i++) {
       double r = dsqrt(xs[i]);
       double err = r * r - xs[i];
       if (err < 0) err = -err;
-      assert(err <= 1e-9 * xs[i]);
+      CHECK(err <= 1e-9 * xs[i]);
     }
-    assert(dsqrt(0.0) == 0.0);
+    CHECK(dsqrt(0.0) == 0.0);
   }
 
-  widcc_jit_free(jit);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
   printf("stress: all tests passed\n");
   return 0;
 }

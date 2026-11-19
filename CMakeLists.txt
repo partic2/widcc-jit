@@ -2,10 +2,11 @@
 # -------------------------------------
 # Targets:
 #
-#   widcc_jit   — static library exposing the JIT runtime (public header:
-#                 include/widcc_jit.h). Built in single-file mode from
-#                 src/all.c; all internal symbols are static, so only the
-#                 widcc_jit.h API is exported.
+#   widcc_jit   — static library exposing the JIT Runtime API (symbol map,
+#                 generated code/data ownership) and Compiler API (public
+#                 header: include/widcc_jit.h). Built in single-file mode
+#                 from src/all.c; all internal symbols are static, so only
+#                 the widcc_jit.h API is exported.
 #   jit_test    — functional test suite (examples/jit_test.c), built by
 #                 default; disable with -DWIDCC_BUILD_TESTS=OFF.
 #   stress_svalue — SValue backend stress tests (examples/stress_svalue.c):

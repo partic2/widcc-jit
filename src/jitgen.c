@@ -81,7 +81,8 @@ struct JPendingRel {
 };
 
 typedef struct JTU {
-  WidccJIT *jit;
+  WidccCompiler *cc;
+  WidccRT *rt;
   JStaticCell *static_cells;
   JPendingRel *pending_rels;
 } JTU;
@@ -596,21 +597,21 @@ static void func_addr(JGen *g, Obj *var) {
   if (!var->is_static) {
     // External linkage: known symbol, host symbol, or a cell that is
     // filled once the function is compiled (possibly later in this TU).
-    WidccJIT *jit = g->tu->jit;
-    JitSym *s = jit_sym(jit, var->name);
+    WidccRT *rt = g->tu->rt;
+    JitSym *s = jit_sym(rt, var->name, true);
     if (s->addr) {
       JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_R0, 0,
                            SLJIT_IMM, (sljit_sw)s->addr));
       return;
     }
-    void *host = jit_host_resolve(jit, var->name);
+    void *host = (*jit_host_resolver)(rt, var->name);
     if (host) {
       s->addr = host;
       JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_R0, 0,
                            SLJIT_IMM, (sljit_sw)host));
       return;
     }
-    void **cell = jit_sym_cell(s, jit);
+    void **cell = jit_sym_cell(s);
     load_abs(g, cell);
     return;
   }
@@ -622,9 +623,10 @@ static void func_addr(JGen *g, Obj *var) {
       return;
     }
   }
-  JStaticCell *sc = cc_calloc(1, sizeof(JStaticCell));
+  WidccRT *rt = g->tu->rt;
+  JStaticCell *sc = rt_alloc_func(rt, sizeof(JStaticCell));
   sc->fn = var;
-  sc->cell = cc_calloc(1, sizeof(void *));
+  sc->cell = rt_alloc_func(rt, sizeof(void *));
   *sc->cell = jit_undefined_fn_addr();
   sc->next = g->tu->static_cells;
   g->tu->static_cells = sc;
@@ -643,14 +645,14 @@ static void global_addr(JGen *g, Obj *var) {
   if (var->is_static)
     error("jitgen: undefined static variable: %s", var->name);
 
-  // Extern: resolve from the instance table or the host process,
+  // Extern: resolve from the runtime table or the host process,
   // otherwise defer through a runtime-owned indirection cell filled at
   // definition time.
-  WidccJIT *jit = g->tu->jit;
-  JitSym *s = jit_sym(jit, var->name);
+  WidccRT *rt = g->tu->rt;
+  JitSym *s = jit_sym(rt, var->name, false);
   void *addr = s->addr;
   if (!addr) {
-    addr = jit_host_resolve(jit, var->name);
+    addr = (*jit_host_resolver)(rt, var->name);
     if (addr)
       s->addr = addr;
   }
@@ -659,7 +661,7 @@ static void global_addr(JGen *g, Obj *var) {
                          SLJIT_IMM, (sljit_sw)addr));
     return;
   }
-  void **cell = jit_sym_cell(s, jit);
+  void **cell = jit_sym_cell(s);
   load_abs(g, cell);
 }
 
@@ -2642,7 +2644,7 @@ static void compile_function(JTU *tu, Obj *fn) {
   g.C = sljit_create_compiler(NULL);
   if (!g.C)
     error("jitgen: sljit compiler allocation failed");
-  tu->jit->active_compiler = g.C;
+  tu->cc->active_compiler = g.C;
 
   mark_stmt_addrs(fn->body);
 
@@ -2760,18 +2762,18 @@ static void compile_function(JTU *tu, Obj *fn) {
   void *code = sljit_generate_code(g.C, 0, NULL);
   if (!code) {
     // On error the compiler is released by the setjmp error path in
-    // widcc_jit_compile via jit->active_compiler.
+    // widcc_cc_compile via cc->active_compiler.
     sljit_s32 e = sljit_get_compiler_error(g.C);
     error("jitgen: code generation failed for %s (sljit error %d)", fn->name, e);
   }
   sljit_free_compiler(g.C);
-  tu->jit->active_compiler = NULL;
+  tu->cc->active_compiler = NULL;
 
-  WidccJIT *jit = tu->jit;
-  JitCode *jc = cc_calloc(1, sizeof(JitCode));
+  WidccRT *jrt = tu->rt;
+  JitCode *jc = rt_alloc(sizeof(JitCode));
   jc->code = code;
-  jc->next = jit->codes;
-  jit->codes = jc;
+  jc->next = jrt->codes;
+  jrt->codes = jc;
 
   fn->jit_addr = code;
   if (fn->is_static)
@@ -2779,8 +2781,8 @@ static void compile_function(JTU *tu, Obj *fn) {
 
   // A later definition replaces an earlier one: new lookups resolve to the
   // new code and indirection cells are repointed. Old code stays alive (and
-  // callable through previously obtained pointers) until widcc_jit_free.
-  JitSym *s = jit_sym(jit, fn->name);
+  // callable through previously obtained pointers) until widcc_rt_free_funcs.
+  JitSym *s = jit_sym(jrt, fn->name, true);
   s->addr = code;
   if (s->cell)
     *s->cell = code;
@@ -2816,10 +2818,10 @@ static void *resolve_reloc_target(JTU *tu, Obj *prog, char *name, Obj **target_o
     *target_out = target;
   if (target && target->jit_addr)
     return target->jit_addr;
-  JitSym *s = jit_sym(tu->jit, name);
+  JitSym *s = jit_sym(tu->rt, name, target && target->ty->kind == TY_FUNC);
   if (s->addr)
     return s->addr;
-  void *host = jit_host_resolve(tu->jit, name);
+  void *host = (*jit_host_resolver)(tu->rt, name);
   if (host) {
     s->addr = host;
     return host;
@@ -2847,8 +2849,8 @@ static void emit_data(JTU *tu, Obj *prog) {
     if (sz < 0)
       error("jitgen: object '%s' has incomplete type", var->name);
 
-    WidccJIT *jit = tu->jit;
-    JitSym *s = var->is_static ? NULL : jit_sym(jit, var->name);
+    WidccRT *rt = tu->rt;
+    JitSym *s = var->is_static ? NULL : jit_sym(rt, var->name, false);
 
     char *buf;
     if (s && s->addr) {
@@ -2863,20 +2865,14 @@ static void emit_data(JTU *tu, Obj *prog) {
       memset(buf, 0, sz);
       s->is_tentative = false;
     } else {
-      // Linkage-dependent allocation: `static` data lives in the
-      // compile-time arena (only this compilation sees it), while
-      // `extern` data goes into the runtime heap so it survives
-      // repeated compilations and can be exposed to the host.
-      if (var->is_static) {
-        buf = cc_calloc(1, MAX(sz, 1));
-      } else {
-        buf = jit_calloc(jit, 1, MAX(sz, 1));
-      }
+      // All generated data lives on the runtime heap: machine code keeps
+      // referring to it after the compiler (and its arena) is destroyed.
+      buf = rt_alloc_data(rt, MAX(sz, 1));
       if (s) {
         s->addr = buf;
         s->is_tentative = var->is_tentative;
         // If any call site has already asked for an indirection cell
-        // (e.g. `jit_map_symbol` or a forward reference), repoint it.
+        // (e.g. a forward reference), repoint it.
         if (s->cell)
           *s->cell = buf;
       }
@@ -2915,10 +2911,11 @@ static void emit_data(JTU *tu, Obj *prog) {
 // Translation unit entry point
 //
 
-static void jitgen_tu(WidccJIT *jit, Obj *prog) {
+static void jitgen_tu(WidccCompiler *cc, Obj *prog) {
   JTU tu;
   memset(&tu, 0, sizeof(tu));
-  tu.jit = jit;
+  tu.cc = cc;
+  tu.rt = cc->rt;
 
   // Data first: function initializers may reference functions compiled below.
   emit_data(&tu, prog);

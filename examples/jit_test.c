@@ -2,19 +2,35 @@
 //
 // Covers: arithmetic, control flow, functions/recursion, forward references
 // across translation units, structs, arrays, pointers, strings, global
-// variables, host symbol mapping, repeated compilation, and tiered
-// (code / runtime / arena) release.
+// variables, host symbol registration, repeated compilation, and per-kind
+// runtime release.
 #include "widcc_jit.h"
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// A compiler paired with the runtime it compiles into.
+typedef struct {
+  WidccCompiler *cc;
+  WidccRT *rt;
+} JIT;
+
+// Always-evaluated check: unlike assert(), it survives -DNDEBUG, so API
+// calls placed inside it are never compiled out.
+#define CHECK(expr)                                                         \
+  do {                                                                      \
+    if (!(expr)) {                                                          \
+      fprintf(stderr, "check failed at %s:%d: %s\n", __FILE__, __LINE__,    \
+              #expr);                                                       \
+      exit(1);                                                              \
+    }                                                                       \
+  } while (0)
+
 #define CHECK_COMPILE(jit, name, src)                                       \
   do {                                                                      \
-    if (widcc_jit_compile(jit, name, src) != 0) {                          \
-      fprintf(stderr, "compile %s failed: %s\n", name,                     \
-              widcc_jit_error(jit));                                       \
+    if (widcc_cc_compile((jit)->cc, name, src) != 0) {                      \
+      fprintf(stderr, "compile %s failed: %s\n", name,                      \
+              widcc_cc_error((jit)->cc));                                   \
       exit(1);                                                              \
     }                                                                       \
   } while (0)
@@ -32,7 +48,7 @@ static int host_add(int a, int b) { return a + b; }
 static volatile int host_counter = 0;
 static void host_bump(void) { host_counter++; }
 
-static void test_arith_control(WidccJIT *jit) {
+static void test_arith_control(JIT *jit) {
   CHECK_COMPILE(jit, "arith.c",
     "int arith(int a, int b) { return a * b + (a - b) % 7; }\n"
     "int branches(int x) {\n"
@@ -60,41 +76,41 @@ static void test_arith_control(WidccJIT *jit) {
     "int tern(int x) { return x > 0 ? x : -x; }\n"
     "int logi(int x) { return (x > 0 && x < 10) || x == 100; }\n");
 
-  int (*arith)(int, int) = widcc_jit_symbol(jit, "arith");
-  int (*branches)(int) = widcc_jit_symbol(jit, "branches");
-  int (*sw)(int) = widcc_jit_symbol(jit, "sw");
-  int (*gto)(int) = widcc_jit_symbol(jit, "gto");
-  int (*tern)(int) = widcc_jit_symbol(jit, "tern");
-  int (*logi)(int) = widcc_jit_symbol(jit, "logi");
-  assert(arith && branches && sw && gto && tern && logi);
+  int (*arith)(int, int) = widcc_rt_lookup(jit->rt, "arith");
+  int (*branches)(int) = widcc_rt_lookup(jit->rt, "branches");
+  int (*sw)(int) = widcc_rt_lookup(jit->rt, "sw");
+  int (*gto)(int) = widcc_rt_lookup(jit->rt, "gto");
+  int (*tern)(int) = widcc_rt_lookup(jit->rt, "tern");
+  int (*logi)(int) = widcc_rt_lookup(jit->rt, "logi");
+  CHECK(arith && branches && sw && gto && tern && logi);
 
-  assert(arith(5, 3) == 5 * 3 + (5 - 3) % 7);
+  CHECK(arith(5, 3) == 5 * 3 + (5 - 3) % 7);
   // r=2(if)+6(for:0+1+2+3)+2(while, 4->1->-2)+1(do) = 11
-  assert(branches(4) == 2 + (0 + 1 + 2 + 3) + 2 + 1);
-  assert(sw(1) == 11);
-  assert(sw(3) == 23);
-  assert(sw(7) == 58);
-  assert(sw(42) == 99);
-  assert(gto(5) == 15);
-  assert(tern(-9) == 9);
-  assert(logi(5) == 1 && logi(100) == 1 && logi(50) == 0);
+  CHECK(branches(4) == 2 + (0 + 1 + 2 + 3) + 2 + 1);
+  CHECK(sw(1) == 11);
+  CHECK(sw(3) == 23);
+  CHECK(sw(7) == 58);
+  CHECK(sw(42) == 99);
+  CHECK(gto(5) == 15);
+  CHECK(tern(-9) == 9);
+  CHECK(logi(5) == 1 && logi(100) == 1 && logi(50) == 0);
 }
 
-static void test_func_recursion(WidccJIT *jit) {
+static void test_func_recursion(JIT *jit) {
   CHECK_COMPILE(jit, "rec.c",
     "int fib(int n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }\n"
     "static int helper(int x) { return x * 3; }\n"
     "int use_static(int x) { return helper(x) + 1; }\n");
 
-  int (*fib)(int) = widcc_jit_symbol(jit, "fib");
-  int (*use_static)(int) = widcc_jit_symbol(jit, "use_static");
-  assert(fib && use_static);
-  assert(fib(10) == 55);
-  assert(use_static(5) == 16);
-  assert(widcc_jit_symbol(jit, "helper") == NULL);
+  int (*fib)(int) = widcc_rt_lookup(jit->rt, "fib");
+  int (*use_static)(int) = widcc_rt_lookup(jit->rt, "use_static");
+  CHECK(fib && use_static);
+  CHECK(fib(10) == 55);
+  CHECK(use_static(5) == 16);
+  CHECK(widcc_rt_lookup(jit->rt, "helper") == NULL);
 }
 
-static void test_forward_ref(WidccJIT *jit) {
+static void test_forward_ref(JIT *jit) {
   CHECK_COMPILE(jit, "fwd1.c",
     "int is_even(int n);\n"
     "int is_odd(int n) { return n == 0 ? 0 : is_even(n - 1); }\n");
@@ -102,14 +118,14 @@ static void test_forward_ref(WidccJIT *jit) {
     "int is_odd(int n);\n"
     "int is_even(int n) { return n == 0 ? 1 : is_odd(n - 1); }\n");
 
-  int (*is_even)(int) = widcc_jit_symbol(jit, "is_even");
-  int (*is_odd)(int) = widcc_jit_symbol(jit, "is_odd");
-  assert(is_even && is_odd);
-  assert(is_even(10) == 1 && is_even(7) == 0);
-  assert(is_odd(9) == 1 && is_odd(4) == 0);
+  int (*is_even)(int) = widcc_rt_lookup(jit->rt, "is_even");
+  int (*is_odd)(int) = widcc_rt_lookup(jit->rt, "is_odd");
+  CHECK(is_even && is_odd);
+  CHECK(is_even(10) == 1 && is_even(7) == 0);
+  CHECK(is_odd(9) == 1 && is_odd(4) == 0);
 }
 
-static void test_struct_array_ptr(WidccJIT *jit) {
+static void test_struct_array_ptr(JIT *jit) {
   CHECK_COMPILE(jit, "sap.c",
     "struct Point { int x; int y; char tag; };\n"
     "int sum_points(struct Point *ps, int n) {\n"
@@ -137,32 +153,32 @@ static void test_struct_array_ptr(WidccJIT *jit) {
     "}\n");
 
   struct { int x, y; char tag; } ps[3] = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
-  int (*sum_points)(void *, int) = widcc_jit_symbol(jit, "sum_points");
-  int (*deref)(int **) = widcc_jit_symbol(jit, "deref");
-  int (*ptr_arith)(int *) = widcc_jit_symbol(jit, "ptr_arith");
-  int (*local_arr)(void) = widcc_jit_symbol(jit, "local_arr");
-  int (*copy_point)(void *) = widcc_jit_symbol(jit, "copy_point");
-  int (*copy_point_local)(void *) = widcc_jit_symbol(jit, "copy_point_local");
-  assert(sum_points && deref && ptr_arith && local_arr);
-  assert(copy_point && copy_point_local);
-  assert(sum_points(ps, 3) == 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9);
+  int (*sum_points)(void *, int) = widcc_rt_lookup(jit->rt, "sum_points");
+  int (*deref)(int **) = widcc_rt_lookup(jit->rt, "deref");
+  int (*ptr_arith)(int *) = widcc_rt_lookup(jit->rt, "ptr_arith");
+  int (*local_arr)(void) = widcc_rt_lookup(jit->rt, "local_arr");
+  int (*copy_point)(void *) = widcc_rt_lookup(jit->rt, "copy_point");
+  int (*copy_point_local)(void *) = widcc_rt_lookup(jit->rt, "copy_point_local");
+  CHECK(sum_points && deref && ptr_arith && local_arr);
+  CHECK(copy_point && copy_point_local);
+  CHECK(sum_points(ps, 3) == 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9);
 
   int v = 1234;
   int *p = &v;
-  assert(deref(&p) == 1234);
+  CHECK(deref(&p) == 1234);
 
   int arr[5] = {10, 20, 30, 40, 50};
-  assert(ptr_arith(&arr[1]) == 40 - 10);
-  assert(local_arr() == 0 + 1 + 4 + 9 + 16);
+  CHECK(ptr_arith(&arr[1]) == 40 - 10);
+  CHECK(local_arr() == 0 + 1 + 4 + 9 + 16);
 
   // Whole-struct assignment: RHS is a dereference, so the destination address
   // and the copy temp must not collide.
   struct { int x, y; char tag; } one = {3, 4, 5};
-  assert(copy_point(&one) == 3 + 4 + 5);
-  assert(copy_point_local(&one) == 3 * 100 + 4 * 10 + 5);
+  CHECK(copy_point(&one) == 3 + 4 + 5);
+  CHECK(copy_point_local(&one) == 3 * 100 + 4 * 10 + 5);
 }
 
-static void test_strings_globals(WidccJIT *jit) {
+static void test_strings_globals(JIT *jit) {
   CHECK_COMPILE(jit, "str.c",
     "char *greeting = \"hello, jit\";\n"
     "int counter = 41;\n"
@@ -177,28 +193,28 @@ static void test_strings_globals(WidccJIT *jit) {
     "int counter2;\n"
     "void set_counter2(int v) { counter2 = v; }\n");
 
-  int (*bump)(void) = widcc_jit_symbol(jit, "bump");
-  char (*first_char)(void) = widcc_jit_symbol(jit, "first_char");
-  int (*str_len)(char *) = widcc_jit_symbol(jit, "str_len");
-  int *(*counter_addr)(void) = widcc_jit_symbol(jit, "counter_addr");
-  void (*fill_buf)(void) = widcc_jit_symbol(jit, "fill_buf");
-  void (*set_counter2)(int) = widcc_jit_symbol(jit, "set_counter2");
-  int *counter2p = widcc_jit_symbol(jit, "counter2");
-  char *buf = widcc_jit_symbol(jit, "buf");
-  assert(bump && first_char && str_len && counter_addr && fill_buf);
-  assert(set_counter2 && counter2p && buf);
+  int (*bump)(void) = widcc_rt_lookup(jit->rt, "bump");
+  char (*first_char)(void) = widcc_rt_lookup(jit->rt, "first_char");
+  int (*str_len)(char *) = widcc_rt_lookup(jit->rt, "str_len");
+  int *(*counter_addr)(void) = widcc_rt_lookup(jit->rt, "counter_addr");
+  void (*fill_buf)(void) = widcc_rt_lookup(jit->rt, "fill_buf");
+  void (*set_counter2)(int) = widcc_rt_lookup(jit->rt, "set_counter2");
+  int *counter2p = widcc_rt_lookup(jit->rt, "counter2");
+  char *buf = widcc_rt_lookup(jit->rt, "buf");
+  CHECK(bump && first_char && str_len && counter_addr && fill_buf);
+  CHECK(set_counter2 && counter2p && buf);
 
-  assert(first_char() == 'h');
-  assert(str_len("abcdef") == 6);
-  assert(bump() == 42 && bump() == 43);
-  assert(*counter_addr() == 43);
+  CHECK(first_char() == 'h');
+  CHECK(str_len("abcdef") == 6);
+  CHECK(bump() == 42 && bump() == 43);
+  CHECK(*counter_addr() == 43);
   fill_buf();
-  assert(buf[0] == 'x' && buf[1] == 'y' && buf[2] == 0);
+  CHECK(buf[0] == 'x' && buf[1] == 'y' && buf[2] == 0);
   set_counter2(777);
-  assert(*counter2p == 777);
+  CHECK(*counter2p == 777);
 }
 
-static void test_float(WidccJIT *jit) {
+static void test_float(JIT *jit) {
   CHECK_COMPILE(jit, "float.c",
     "double dadd(double a, double b) { return a + b; }\n"
     "float fmul(float a, float b) { return a * b; }\n"
@@ -206,24 +222,24 @@ static void test_float(WidccJIT *jit) {
     "int dcmp(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }\n"
     "double ddiv(double a, double b) { return a / b; }\n");
 
-  double (*dadd)(double, double) = widcc_jit_symbol(jit, "dadd");
-  float (*fmul)(float, float) = widcc_jit_symbol(jit, "fmul");
-  double (*mix)(int, double, float) = widcc_jit_symbol(jit, "mix");
-  int (*dcmp)(double, double) = widcc_jit_symbol(jit, "dcmp");
-  double (*ddiv)(double, double) = widcc_jit_symbol(jit, "ddiv");
-  assert(dadd && fmul && mix && dcmp && ddiv);
+  double (*dadd)(double, double) = widcc_rt_lookup(jit->rt, "dadd");
+  float (*fmul)(float, float) = widcc_rt_lookup(jit->rt, "fmul");
+  double (*mix)(int, double, float) = widcc_rt_lookup(jit->rt, "mix");
+  int (*dcmp)(double, double) = widcc_rt_lookup(jit->rt, "dcmp");
+  double (*ddiv)(double, double) = widcc_rt_lookup(jit->rt, "ddiv");
+  CHECK(dadd && fmul && mix && dcmp && ddiv);
 
-  assert(dadd(1.5, 2.25) == 3.75);
-  assert(fmul(2.0f, 3.5f) == 7.0f);
-  assert(mix(1, 0.5, 0.25f) == 1.75);
-  assert(dcmp(1.0, 2.0) == -1 && dcmp(2.0, 1.0) == 1 && dcmp(1.0, 1.0) == 0);
-  assert(ddiv(7.0, 2.0) == 3.5);
+  CHECK(dadd(1.5, 2.25) == 3.75);
+  CHECK(fmul(2.0f, 3.5f) == 7.0f);
+  CHECK(mix(1, 0.5, 0.25f) == 1.75);
+  CHECK(dcmp(1.0, 2.0) == -1 && dcmp(2.0, 1.0) == 1 && dcmp(1.0, 1.0) == 0);
+  CHECK(ddiv(7.0, 2.0) == 3.5);
 }
 
-static void test_host_symbols(WidccJIT *jit) {
-  assert(widcc_jit_map_symbol(jit, "host_add", host_add) == 0);
-  assert(widcc_jit_map_symbol(jit, "host_bump", host_bump) == 0);
-  assert(widcc_jit_map_symbol(jit, "host_counter", (void *)&host_counter) == 0);
+static void test_host_symbols(JIT *jit) {
+  CHECK(widcc_rt_add_func(jit->rt, "host_add", host_add) == 0);
+  CHECK(widcc_rt_add_func(jit->rt, "host_bump", host_bump) == 0);
+  CHECK(widcc_rt_add_var(jit->rt, "host_counter", (void *)&host_counter) == 0);
 
   CHECK_COMPILE(jit, "host.c",
     "int host_add(int a, int b);\n"
@@ -232,81 +248,85 @@ static void test_host_symbols(WidccJIT *jit) {
     "int call_host(int x) { return host_add(x, 100); }\n"
     "int bump_host(void) { host_bump(); host_bump(); return host_counter; }\n");
 
-  int (*call_host)(int) = widcc_jit_symbol(jit, "call_host");
-  int (*bump_host)(void) = widcc_jit_symbol(jit, "bump_host");
-  assert(call_host && bump_host);
-  assert(call_host(23) == 123);
+  int (*call_host)(int) = widcc_rt_lookup(jit->rt, "call_host");
+  int (*bump_host)(void) = widcc_rt_lookup(jit->rt, "bump_host");
+  CHECK(call_host && bump_host);
+  CHECK(call_host(23) == 123);
   int before = host_counter;
-  assert(bump_host() == before + 2);
+  CHECK(bump_host() == before + 2);
 }
 
-static void test_recompile(WidccJIT *jit) {
+static void test_recompile(JIT *jit) {
   CHECK_COMPILE(jit, "v1.c", "int version(void) { return 1; }\n");
-  int (*v1)(void) = widcc_jit_symbol(jit, "version");
-  assert(v1 && v1() == 1);
+  int (*v1)(void) = widcc_rt_lookup(jit->rt, "version");
+  CHECK(v1 && v1() == 1);
 
   CHECK_COMPILE(jit, "v2.c", "int version(void) { return 2; }\n");
-  int (*v2)(void) = widcc_jit_symbol(jit, "version");
-  assert(v2 && v2() == 2);
-  assert(v1() == 1);
+  int (*v2)(void) = widcc_rt_lookup(jit->rt, "version");
+  CHECK(v2 && v2() == 2);
+  CHECK(v1() == 1);
 }
 
-static void test_error_recovery(WidccJIT *jit) {
-  assert(widcc_jit_compile(jit, "bad.c", "int broken( { return ;") == -1);
-  assert(strlen(widcc_jit_error(jit)) > 0);
+static void test_error_recovery(JIT *jit) {
+  CHECK(widcc_cc_compile(jit->cc, "bad.c", "int broken( { return ;") == -1);
+  CHECK(strlen(widcc_cc_error(jit->cc)) > 0);
   CHECK_COMPILE(jit, "ok.c", "int still_ok(void) { return 7; }\n");
-  int (*still_ok)(void) = widcc_jit_symbol(jit, "still_ok");
-  assert(still_ok && still_ok() == 7);
+  int (*still_ok)(void) = widcc_rt_lookup(jit->rt, "still_ok");
+  CHECK(still_ok && still_ok() == 7);
 }
 
-static void test_tiered_release(void) {
-  WidccJIT *jit = widcc_jit_new();
+static void test_runtime_release(void) {
+  WidccRT *rt = widcc_rt_new();
+  WidccCompiler *cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
+  JIT jit = {cc, rt};
 
-  // Compile something — tier 1 (code) + tier 2 (rt data) both produced.
-  CHECK_COMPILE(jit, "tiers.c",
+  // Compile something — generated code and generated data are both owned
+  // by the runtime, not by the compiler.
+  CHECK_COMPILE(&jit, "tiers.c",
     "int counter = 5;\n"
     "int add1(int x) { return x + 1; }\n");
+  CHECK(widcc_rt_list_symbols(rt, NULL, 0) >= 2);
 
-  int (*add1)(int) = widcc_jit_symbol(jit, "add1");
-  assert(add1 && add1(9) == 10);
+  int (*add1)(int) = widcc_rt_lookup(rt, "add1");
+  CHECK(add1 && add1(9) == 10);
 
-  // Tier 1 only: code is gone, rt data still alive.
-  widcc_jit_free_code(jit);
+  // Release the compiler first: runtime symbols must stay callable.
+  widcc_cc_free(cc);
+  cc = NULL;
+  CHECK(add1(41) == 42);
 
-  // External symbol lookup still reaches data via rt-owned cell.
-  int *c = widcc_jit_symbol(jit, "counter");
-  assert(c && *c == 5);
+  // Functions only: code and function entries are gone, generated data
+  // (and its variable entry) stays.
+  widcc_rt_free_funcs(rt);
+  CHECK(widcc_rt_lookup(rt, "add1") == NULL);
+  int *c = widcc_rt_lookup(rt, "counter");
+  CHECK(c && *c == 5);
 
-  // Tier 2 only: rt data gone, instance symbol table still exists
-  // (backed by arena). Recompilation re-fills both tiers.
-  widcc_jit_free_rt(jit);
+  // Variables only: generated data and variable entries are gone.
+  widcc_rt_free_vars(rt);
+  CHECK(widcc_rt_lookup(rt, "counter") == NULL);
+  CHECK(widcc_rt_lookup(rt, "add1") == NULL);
 
-  // Recompile after tier-1+tier-2 release: should succeed and produce
-  // fresh code + fresh rt data.
-  CHECK_COMPILE(jit, "tiers2.c",
+  // The runtime is reusable after both releases.
+  cc = widcc_cc_new(rt);
+  CHECK(cc);
+  jit.cc = cc;
+  CHECK_COMPILE(&jit, "tiers2.c",
     "int counter2 = 42;\n"
     "int times2(int x) { return x * 2; }\n");
-  int (*times2)(int) = widcc_jit_symbol(jit, "times2");
-  int *c2 = widcc_jit_symbol(jit, "counter2");
-  assert(times2 && times2(21) == 42);
-  assert(c2 && *c2 == 42);
+  int (*times2)(int) = widcc_rt_lookup(rt, "times2");
+  int *c2 = widcc_rt_lookup(rt, "counter2");
+  CHECK(times2 && times2(21) == 42);
+  CHECK(c2 && *c2 == 42);
 
-  // Tier 3 (arena): must release code + rt first.
-  widcc_jit_free_code(jit);
-  widcc_jit_free_rt(jit);
-  widcc_jit_free_arena(jit);
-
-  // After arena release, instance is reusable (sym table was reset).
-  CHECK_COMPILE(jit, "tiers3.c", "int hello(void) { return 99; }\n");
-  int (*hello)(void) = widcc_jit_symbol(jit, "hello");
-  assert(hello && hello() == 99);
-
-  widcc_jit_free(jit);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
 }
 
 // --- Additional algorithm / integer-width tests ---
 
-static void test_sorting(WidccJIT *jit) {
+static void test_sorting(JIT *jit) {
   CHECK_COMPILE(jit, "sort.c",
     "void bubble(int *a, int n) {\n"
     "  for (int i = 0; i < n - 1; i++)\n"
@@ -341,12 +361,12 @@ static void test_sorting(WidccJIT *jit) {
     "  return s;\n"
     "}\n");
 
-  void (*bubble)(int *, int) = widcc_jit_symbol(jit, "bubble");
-  void (*insertion)(int *, int) = widcc_jit_symbol(jit, "insertion");
-  int (*is_sorted)(int *, int) = widcc_jit_symbol(jit, "is_sorted");
-  int (*local_bubble_ok)(void) = widcc_jit_symbol(jit, "local_bubble_ok");
-  int (*sum_after_sort)(int *, int) = widcc_jit_symbol(jit, "sum_after_sort");
-  assert(bubble && insertion && is_sorted && local_bubble_ok && sum_after_sort);
+  void (*bubble)(int *, int) = widcc_rt_lookup(jit->rt, "bubble");
+  void (*insertion)(int *, int) = widcc_rt_lookup(jit->rt, "insertion");
+  int (*is_sorted)(int *, int) = widcc_rt_lookup(jit->rt, "is_sorted");
+  int (*local_bubble_ok)(void) = widcc_rt_lookup(jit->rt, "local_bubble_ok");
+  int (*sum_after_sort)(int *, int) = widcc_rt_lookup(jit->rt, "sum_after_sort");
+  CHECK(bubble && insertion && is_sorted && local_bubble_ok && sum_after_sort);
 
   enum { N = 64 };
   int a[N], b[N], c[N];
@@ -359,17 +379,17 @@ static void test_sorting(WidccJIT *jit) {
   }
   bubble(a, N);
   insertion(b, N);
-  assert(is_sorted(a, N) == 1);
-  assert(is_sorted(b, N) == 1);
+  CHECK(is_sorted(a, N) == 1);
+  CHECK(is_sorted(b, N) == 1);
   for (int i = 0; i < N; i++)
-    assert(a[i] == b[i]);
+    CHECK(a[i] == b[i]);
 
   // Sorting must be a permutation: the sum is unchanged.
-  assert(sum_after_sort(c, N) == total);
-  assert(local_bubble_ok() == 1);
+  CHECK(sum_after_sort(c, N) == total);
+  CHECK(local_bubble_ok() == 1);
 }
 
-static void test_nested_loops(WidccJIT *jit) {
+static void test_nested_loops(JIT *jit) {
   CHECK_COMPILE(jit, "loops.c",
     "int nested(int n) {\n"
     "  int c = 0;\n"
@@ -397,10 +417,10 @@ static void test_nested_loops(WidccJIT *jit) {
     "  return t;\n"
     "}\n");
 
-  int (*nested)(int) = widcc_jit_symbol(jit, "nested");
-  int (*dowhile)(int) = widcc_jit_symbol(jit, "dowhile");
-  int (*matrix_trace)(int) = widcc_jit_symbol(jit, "matrix_trace");
-  assert(nested && dowhile && matrix_trace);
+  int (*nested)(int) = widcc_rt_lookup(jit->rt, "nested");
+  int (*dowhile)(int) = widcc_rt_lookup(jit->rt, "dowhile");
+  int (*matrix_trace)(int) = widcc_rt_lookup(jit->rt, "matrix_trace");
+  CHECK(nested && dowhile && matrix_trace);
 
   // Reference values computed with the same semantics on the host.
   for (int n = 0; n <= 9; n++) {
@@ -412,17 +432,17 @@ static void test_nested_loops(WidccJIT *jit) {
         c += i * j + 1;
       }
     }
-    assert(nested(n) == c);
+    CHECK(nested(n) == c);
   }
 
   int s = 0, m = 13;
   do { s += m; m -= 1; } while (m > 0 && s < 100);
-  assert(dowhile(13) == s);
+  CHECK(dowhile(13) == s);
 
-  assert(matrix_trace(5) == 0 + 6 + 12 + 18 + 24);
+  CHECK(matrix_trace(5) == 0 + 6 + 12 + 18 + 24);
 }
 
-static void test_int32_semantics(WidccJIT *jit) {
+static void test_int32_semantics(JIT *jit) {
   CHECK_COMPILE(jit, "int32.c",
     "unsigned udiv(unsigned a, unsigned b) { return a / b; }\n"
     "unsigned umod(unsigned a, unsigned b) { return a % b; }\n"
@@ -436,40 +456,40 @@ static void test_int32_semantics(WidccJIT *jit) {
     "int trunc_short(int x) { short s = x; return s; }\n"
     "int uchar_wrap(void) { unsigned char c = 250; c = c + 10; return c; }\n");
 
-  unsigned (*udiv)(unsigned, unsigned) = widcc_jit_symbol(jit, "udiv");
-  unsigned (*umod)(unsigned, unsigned) = widcc_jit_symbol(jit, "umod");
-  int (*ult)(unsigned, unsigned) = widcc_jit_symbol(jit, "ult");
-  int (*slt)(int, int) = widcc_jit_symbol(jit, "slt");
-  unsigned (*ushr)(unsigned, int) = widcc_jit_symbol(jit, "ushr");
-  int (*sshr)(int, int) = widcc_jit_symbol(jit, "sshr");
-  int (*shl_wrap)(int) = widcc_jit_symbol(jit, "shl_wrap");
-  int (*add_wrap)(int) = widcc_jit_symbol(jit, "add_wrap");
-  int (*trunc_char)(int) = widcc_jit_symbol(jit, "trunc_char");
-  int (*trunc_short)(int) = widcc_jit_symbol(jit, "trunc_short");
-  int (*uchar_wrap)(void) = widcc_jit_symbol(jit, "uchar_wrap");
-  assert(udiv && umod && ult && slt && ushr && sshr && shl_wrap && add_wrap &&
+  unsigned (*udiv)(unsigned, unsigned) = widcc_rt_lookup(jit->rt, "udiv");
+  unsigned (*umod)(unsigned, unsigned) = widcc_rt_lookup(jit->rt, "umod");
+  int (*ult)(unsigned, unsigned) = widcc_rt_lookup(jit->rt, "ult");
+  int (*slt)(int, int) = widcc_rt_lookup(jit->rt, "slt");
+  unsigned (*ushr)(unsigned, int) = widcc_rt_lookup(jit->rt, "ushr");
+  int (*sshr)(int, int) = widcc_rt_lookup(jit->rt, "sshr");
+  int (*shl_wrap)(int) = widcc_rt_lookup(jit->rt, "shl_wrap");
+  int (*add_wrap)(int) = widcc_rt_lookup(jit->rt, "add_wrap");
+  int (*trunc_char)(int) = widcc_rt_lookup(jit->rt, "trunc_char");
+  int (*trunc_short)(int) = widcc_rt_lookup(jit->rt, "trunc_short");
+  int (*uchar_wrap)(void) = widcc_rt_lookup(jit->rt, "uchar_wrap");
+  CHECK(udiv && umod && ult && slt && ushr && sshr && shl_wrap && add_wrap &&
          trunc_char && trunc_short && uchar_wrap);
 
   // Unsigned 32-bit division/modulo must not be emitted as signed.
-  assert(udiv(0xFFFFFFF0u, 3u) == 0xFFFFFFF0u / 3u);
-  assert(udiv(0x80000000u, 2u) == 0x40000000u);
-  assert(umod(0xFFFFFFF5u, 7u) == 0xFFFFFFF5u % 7u);
-  assert(udiv(100u, 0xFFFFFFFFu) == 0u);
+  CHECK(udiv(0xFFFFFFF0u, 3u) == 0xFFFFFFF0u / 3u);
+  CHECK(udiv(0x80000000u, 2u) == 0x40000000u);
+  CHECK(umod(0xFFFFFFF5u, 7u) == 0xFFFFFFF5u % 7u);
+  CHECK(udiv(100u, 0xFFFFFFFFu) == 0u);
 
   // Signed vs unsigned comparison.
-  assert(ult(0xFFFFFFFFu, 1u) == 0);
-  assert(slt(-1, 1) == 1);
+  CHECK(ult(0xFFFFFFFFu, 1u) == 0);
+  CHECK(slt(-1, 1) == 1);
 
   // Logical vs arithmetic right shift, and 32-bit wraparound.
-  assert(ushr(0xFFFFFFFFu, 4) == 0x0FFFFFFFu);
-  assert(sshr(-16, 2) == -4);
-  assert(shl_wrap(0x10000000) == 0);
-  assert(add_wrap(0x7FFFFFFF) == (int)0x80000000);
+  CHECK(ushr(0xFFFFFFFFu, 4) == 0x0FFFFFFFu);
+  CHECK(sshr(-16, 2) == -4);
+  CHECK(shl_wrap(0x10000000) == 0);
+  CHECK(add_wrap(0x7FFFFFFF) == (int)0x80000000);
 
   // Narrow integer store truncation and zero/sign extension on load.
-  assert(trunc_char(300) == 44);
-  assert(trunc_short(70000) == 4464);
-  assert(uchar_wrap() == 4);
+  CHECK(trunc_char(300) == 44);
+  CHECK(trunc_short(70000) == 4464);
+  CHECK(uchar_wrap() == 4);
 }
 
 // 64-bit integers go through the wide path on a 64-bit host. On a 32-bit
@@ -477,25 +497,25 @@ static void test_int32_semantics(WidccJIT *jit) {
 // and comparisons are open-coded, and mul/div/mod/shift/float conversions
 // call host helpers. Parameters and return values stay rejected there, so
 // the tests expose int/double interfaces and publish results through globals.
-static void test_int64_semantics(WidccJIT *jit) {
+static void test_int64_semantics(JIT *jit) {
 #if HOST_64BIT
   CHECK_COMPILE(jit, "int64.c",
     "long long wide_mul(long long a, long long b) { return a * b; }\n"
     "long long wide_divmod(long long a, long long b) { return a / b + a % b; }\n");
 
-  long long (*wide_mul)(long long, long long) = widcc_jit_symbol(jit, "wide_mul");
+  long long (*wide_mul)(long long, long long) = widcc_rt_lookup(jit->rt, "wide_mul");
   long long (*wide_divmod)(long long, long long) =
-      widcc_jit_symbol(jit, "wide_divmod");
-  assert(wide_mul && wide_divmod);
+      widcc_rt_lookup(jit->rt, "wide_divmod");
+  CHECK(wide_mul && wide_divmod);
 
   // 64-bit operands still use the wide path.
-  assert(wide_mul(3037000499LL, 3LL) == 3037000499LL * 3LL);
-  assert(wide_divmod(10000000000LL, 7LL) == 10000000000LL / 7LL + 10000000000LL % 7LL);
+  CHECK(wide_mul(3037000499LL, 3LL) == 3037000499LL * 3LL);
+  CHECK(wide_divmod(10000000000LL, 7LL) == 10000000000LL / 7LL + 10000000000LL % 7LL);
 #else
   // i64 parameters/returns are still a compile-time error on a 32-bit host.
-  assert(widcc_jit_compile(jit, "int64_param.c",
+  CHECK(widcc_cc_compile(jit->cc, "int64_param.c",
     "long long wide_mul(long long a, long long b) { return a * b; }\n") == -1);
-  assert(strstr(widcc_jit_error(jit), "64-bit") != NULL);
+  CHECK(strstr(widcc_cc_error(jit->cc), "64-bit") != NULL);
 
   CHECK_COMPILE(jit, "int64_32.c",
     "long long g_add, g_sub, g_mul, g_div, g_mod;\n"
@@ -577,73 +597,73 @@ static void test_int64_semantics(WidccJIT *jit) {
     "  return g_index[i] + g_index[i - 1];\n"
     "}\n");
 
-  void (*i64_binops)(void) = widcc_jit_symbol(jit, "i64_binops");
-  int (*i64_cmps)(void) = widcc_jit_symbol(jit, "i64_cmps");
-  void (*i64_sum)(int) = widcc_jit_symbol(jit, "i64_sum");
-  void (*i64_assign)(void) = widcc_jit_symbol(jit, "i64_assign");
-  int (*i64_logic)(void) = widcc_jit_symbol(jit, "i64_logic");
-  int (*i64_cond)(int) = widcc_jit_symbol(jit, "i64_cond");
-  int (*i64_trunc)(void) = widcc_jit_symbol(jit, "i64_trunc");
-  int (*i64_from_int)(int) = widcc_jit_symbol(jit, "i64_from_int");
-  double (*i64_to_d)(void) = widcc_jit_symbol(jit, "i64_to_d");
-  int (*i64_from_d)(double) = widcc_jit_symbol(jit, "i64_from_d");
-  int (*i64_index)(void) = widcc_jit_symbol(jit, "i64_index");
-  long long *g_add = widcc_jit_symbol(jit, "g_add");
-  long long *g_sub = widcc_jit_symbol(jit, "g_sub");
-  long long *g_mul = widcc_jit_symbol(jit, "g_mul");
-  long long *g_div = widcc_jit_symbol(jit, "g_div");
-  long long *g_mod = widcc_jit_symbol(jit, "g_mod");
-  long long *g_and = widcc_jit_symbol(jit, "g_and");
-  long long *g_or = widcc_jit_symbol(jit, "g_or");
-  long long *g_xor = widcc_jit_symbol(jit, "g_xor");
-  long long *g_neg = widcc_jit_symbol(jit, "g_neg");
-  long long *g_not = widcc_jit_symbol(jit, "g_not");
-  long long *g_shl = widcc_jit_symbol(jit, "g_shl");
-  long long *g_shr = widcc_jit_symbol(jit, "g_shr");
-  long long *g_sar = widcc_jit_symbol(jit, "g_sar");
-  long long *g_loop = widcc_jit_symbol(jit, "g_loop");
-  long long *g_chain = widcc_jit_symbol(jit, "g_chain");
-  assert(i64_binops && i64_cmps && i64_sum && i64_assign && i64_logic &&
+  void (*i64_binops)(void) = widcc_rt_lookup(jit->rt, "i64_binops");
+  int (*i64_cmps)(void) = widcc_rt_lookup(jit->rt, "i64_cmps");
+  void (*i64_sum)(int) = widcc_rt_lookup(jit->rt, "i64_sum");
+  void (*i64_assign)(void) = widcc_rt_lookup(jit->rt, "i64_assign");
+  int (*i64_logic)(void) = widcc_rt_lookup(jit->rt, "i64_logic");
+  int (*i64_cond)(int) = widcc_rt_lookup(jit->rt, "i64_cond");
+  int (*i64_trunc)(void) = widcc_rt_lookup(jit->rt, "i64_trunc");
+  int (*i64_from_int)(int) = widcc_rt_lookup(jit->rt, "i64_from_int");
+  double (*i64_to_d)(void) = widcc_rt_lookup(jit->rt, "i64_to_d");
+  int (*i64_from_d)(double) = widcc_rt_lookup(jit->rt, "i64_from_d");
+  int (*i64_index)(void) = widcc_rt_lookup(jit->rt, "i64_index");
+  long long *g_add = widcc_rt_lookup(jit->rt, "g_add");
+  long long *g_sub = widcc_rt_lookup(jit->rt, "g_sub");
+  long long *g_mul = widcc_rt_lookup(jit->rt, "g_mul");
+  long long *g_div = widcc_rt_lookup(jit->rt, "g_div");
+  long long *g_mod = widcc_rt_lookup(jit->rt, "g_mod");
+  long long *g_and = widcc_rt_lookup(jit->rt, "g_and");
+  long long *g_or = widcc_rt_lookup(jit->rt, "g_or");
+  long long *g_xor = widcc_rt_lookup(jit->rt, "g_xor");
+  long long *g_neg = widcc_rt_lookup(jit->rt, "g_neg");
+  long long *g_not = widcc_rt_lookup(jit->rt, "g_not");
+  long long *g_shl = widcc_rt_lookup(jit->rt, "g_shl");
+  long long *g_shr = widcc_rt_lookup(jit->rt, "g_shr");
+  long long *g_sar = widcc_rt_lookup(jit->rt, "g_sar");
+  long long *g_loop = widcc_rt_lookup(jit->rt, "g_loop");
+  long long *g_chain = widcc_rt_lookup(jit->rt, "g_chain");
+  CHECK(i64_binops && i64_cmps && i64_sum && i64_assign && i64_logic &&
          i64_cond && i64_trunc && i64_from_int && i64_to_d && i64_from_d &&
          i64_index);
-  assert(g_add && g_sub && g_mul && g_div && g_mod && g_and && g_or && g_xor &&
+  CHECK(g_add && g_sub && g_mul && g_div && g_mod && g_and && g_or && g_xor &&
          g_neg && g_not && g_shl && g_shr && g_sar && g_loop && g_chain);
 
   const long long a = 0x123456789abcdefLL;
   const long long b = 0x111111111111111LL;
   i64_binops();
-  assert(*g_add == a + b);
-  assert(*g_sub == a - b);
-  assert(*g_mul == a * b);
-  assert(*g_div == a / b);
-  assert(*g_mod == a % b);
-  assert(*g_and == (a & b));
-  assert(*g_or == (a | b));
-  assert(*g_xor == (a ^ b));
-  assert(*g_neg == -a);
-  assert(*g_not == ~a);
-  assert(*g_shl == (long long)((unsigned long long)a << 5));
-  assert(*g_shr == a >> 5);
-  assert(*g_sar == (-a) >> 5);
+  CHECK(*g_add == a + b);
+  CHECK(*g_sub == a - b);
+  CHECK(*g_mul == a * b);
+  CHECK(*g_div == a / b);
+  CHECK(*g_mod == a % b);
+  CHECK(*g_and == (a & b));
+  CHECK(*g_or == (a | b));
+  CHECK(*g_xor == (a ^ b));
+  CHECK(*g_neg == -a);
+  CHECK(*g_not == ~a);
+  CHECK(*g_shl == (long long)((unsigned long long)a << 5));
+  CHECK(*g_shr == a >> 5);
+  CHECK(*g_sar == (-a) >> 5);
 
-  assert(i64_cmps() == 63);
+  CHECK(i64_cmps() == 63);
   i64_sum(100);
-  assert(*g_loop == (long long)(5050LL * 0x100000000LL));
+  CHECK(*g_loop == (long long)(5050LL * 0x100000000LL));
   i64_assign();
-  assert(*g_chain == 0x20000000eLL);
-  assert(i64_logic() == 5);
-  assert(i64_cond(1) == 1);
-  assert(i64_cond(0) == 0);
-  assert(i64_trunc() == 0x23456789);
-  assert(i64_from_int(-1) == -1);
-  assert(i64_from_int(5) == 0);
-  assert(i64_to_d() == 4294967297.0);
-  assert(i64_from_d(4294967297.0) == 1);
-  assert(i64_index() == 50);  // pointer arithmetic with a 64-bit index
+  CHECK(*g_chain == 0x20000000eLL);
+  CHECK(i64_logic() == 5);
+  CHECK(i64_cond(1) == 1);
+  CHECK(i64_cond(0) == 0);
+  CHECK(i64_trunc() == 0x23456789);
+  CHECK(i64_from_int(-1) == -1);
+  CHECK(i64_from_int(5) == 0);
+  CHECK(i64_to_d() == 4294967297.0);
+  CHECK(i64_from_d(4294967297.0) == 1);
+  CHECK(i64_index() == 50);  // pointer arithmetic with a 64-bit index
 #endif
 }
 
-static void test_data_model(WidccJIT *jit) {
+static void test_data_model(JIT *jit) {
   CHECK_COMPILE(jit, "model.c",
     "int model_sizes(void) {\n"
     "  return sizeof(void *) + sizeof(long) + sizeof(long long)\n"
@@ -655,56 +675,62 @@ static void test_data_model(WidccJIT *jit) {
     "  int *q = p + 3;\n"
     "  return q - p;\n"
     "}\n");
-  int (*model_sizes)(void) = widcc_jit_symbol(jit, "model_sizes");
-  int (*ptr_step)(void) = widcc_jit_symbol(jit, "ptr_step");
-  assert(model_sizes && ptr_step);
+  int (*model_sizes)(void) = widcc_rt_lookup(jit->rt, "model_sizes");
+  int (*ptr_step)(void) = widcc_rt_lookup(jit->rt, "ptr_step");
+  CHECK(model_sizes && ptr_step);
 
   // Pointers and `long` are 8 bytes on LP64/LLP64 and 4 bytes on ILP32;
   // `long long` is always 8.
 
-  assert(model_sizes() == sizeof(void *) + sizeof(long) + sizeof(long long)
+  CHECK(model_sizes() == sizeof(void *) + sizeof(long) + sizeof(long long)
            + sizeof(short) + sizeof(char));
 
-  assert(ptr_step() == 3);
+  CHECK(ptr_step() == 3);
 }
 
 int main(void) {
-  WidccJIT *jit = widcc_jit_new();
-  assert(jit);
+  WidccRT *rt = widcc_rt_new();
+  WidccCompiler *cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
+  JIT jit = {cc, rt};
 
-  test_arith_control(jit);
-  test_func_recursion(jit);
-  test_forward_ref(jit);
-  test_struct_array_ptr(jit);
-  test_strings_globals(jit);
-  test_float(jit);
-  test_host_symbols(jit);
-  test_recompile(jit);
-  test_error_recovery(jit);
-  test_sorting(jit);
-  test_nested_loops(jit);
-  test_int32_semantics(jit);
-  test_int64_semantics(jit);
-  test_data_model(jit);
+  test_arith_control(&jit);
+  test_func_recursion(&jit);
+  test_forward_ref(&jit);
+  test_struct_array_ptr(&jit);
+  test_strings_globals(&jit);
+  test_float(&jit);
+  test_host_symbols(&jit);
+  test_recompile(&jit);
+  test_error_recovery(&jit);
+  test_sorting(&jit);
+  test_nested_loops(&jit);
+  test_int32_semantics(&jit);
+  test_int64_semantics(&jit);
+  test_data_model(&jit);
 
-  test_tiered_release();
+  test_runtime_release();
 
-  // Two separate instances still work as before.
-  WidccJIT *jit2 = widcc_jit_new();
-  assert(jit2);
-  CHECK_COMPILE(jit2, "other.c",
+  // A second, fully independent runtime/compiler pair.
+  WidccRT *rt2 = widcc_rt_new();
+  WidccCompiler *cc2 = widcc_cc_new(rt2);
+  CHECK(rt2 && cc2);
+  JIT jit2 = {cc2, rt2};
+  CHECK_COMPILE(&jit2, "other.c",
     "int version(void) { return 42; }\n"
     "int triple(int x) { return x * 3; }\n");
-  int (*version2)(void) = widcc_jit_symbol(jit2, "version");
-  int (*triple)(int) = widcc_jit_symbol(jit2, "triple");
-  assert(version2 && version2() == 42);
-  assert(triple && triple(5) == 15);
+  int (*version2)(void) = widcc_rt_lookup(rt2, "version");
+  int (*triple)(int) = widcc_rt_lookup(rt2, "triple");
+  CHECK(version2 && version2() == 42);
+  CHECK(triple && triple(5) == 15);
 
-  int (*v)(void) = widcc_jit_symbol(jit, "version");
-  assert(v && v() == 2);
+  int (*v)(void) = widcc_rt_lookup(rt, "version");
+  CHECK(v && v() == 2);
 
-  widcc_jit_free(jit2);
-  widcc_jit_free(jit);
+  widcc_cc_free(cc2);
+  widcc_rt_free(rt2);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
 
   printf("jit_test: all tests passed\n");
   return 0;

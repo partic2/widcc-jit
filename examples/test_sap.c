@@ -2,10 +2,11 @@
 #include "widcc_jit.h"
 
 int main(void) {
-  WidccJIT *jit = widcc_jit_new();
-  if (!jit) { fprintf(stderr, "new failed\n"); return 1; }
-  
-  if (widcc_jit_compile(jit, "sap.c",
+  WidccRT *rt = widcc_rt_new();
+  WidccCompiler *cc = widcc_cc_new(rt);
+  if (!rt || !cc) { fprintf(stderr, "new failed\n"); return 1; }
+
+  if (widcc_cc_compile(cc, "sap.c",
     "struct Point { int x; int y; char tag; };\n"
     "int sum_points(struct Point *ps, int n) {\n"
     "  int s = 0;\n"
@@ -21,12 +22,13 @@ int main(void) {
     "  for (int i = 0; i < 5; i++) s += a[i];\n"
     "  return s;\n"
     "}\n") != 0) {
-    fprintf(stderr, "compile failed: %s\n", widcc_jit_error(jit));
+    fprintf(stderr, "compile failed: %s\n", widcc_cc_error(cc));
     return 1;
   }
   
-  int (*local_arr)(void) = widcc_jit_symbol(jit, "local_arr");
+  int (*local_arr)(void) = widcc_rt_lookup(rt, "local_arr");
   fprintf(stderr, "local_arr()=%d expected=30\n", local_arr());
-  widcc_jit_free(jit);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
   return 0;
 }

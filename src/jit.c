@@ -1,14 +1,13 @@
 #ifndef WIDCC_JIT_C
 #define WIDCC_JIT_C
 
-// widcc JIT runtime: public API, symbol table and compilation pipeline.
-// See widcc_jit.h for the memory model.
+// widcc JIT: Runtime API (symbol map + generated code/data ownership)
+// and Compiler API (frontend arena + compilation pipeline).
 #include "widcc.h"
 #include "ccctx.h"
 #include "jit_internal.h"
 #include "sljitLir.h"
 #include <string.h>
-#include <assert.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
@@ -17,7 +16,7 @@
 #endif
 
 // ------------------------------------------------------------------
-// Tiered release helpers (all public, declared in widcc_jit.h)
+// Runtime heap helpers
 // ------------------------------------------------------------------
 
 // va_list layout injected into every TU.
@@ -39,100 +38,124 @@ static void jit_undefined_fn(void) {
 }
 static void *jit_undefined_fn_addr(void) { return (void *)jit_undefined_fn; }
 
-// ---------- runtime-owned heap helpers ----------
-
-static void *jit_malloc(WidccJIT *jit, size_t sz) {
-  void *p = malloc(sz);
-  if (!p) {
-    CCCtx *ctx = ccctx();
-    if (ctx->err_active) {
-      snprintf(ctx->err_msg, sizeof(ctx->err_msg),
-               "widcc-jit: runtime heap exhausted (%zu bytes)", sz);
-      longjmp(ctx->err_jmp, 1);
-    }
-    fprintf(stderr, "widcc-jit: runtime heap exhausted (%zu bytes)\n", sz);
-    abort();
-  }
-  JitMallocBlock *b = malloc(sizeof(*b));
-  if (!b) { free(p); abort(); }
-  b->ptr = p; b->next = jit->rt_blocks;
-  jit->rt_blocks = b;
+static void *rt_alloc(size_t sz) {
+  void *p = malloc(sz ? sz : 1);
+  if (!p)
+    error("widcc-jit: out of memory");
   return p;
 }
 
-static void *jit_calloc(WidccJIT *jit, size_t n, size_t sz) {
-  if (n == 0) n = 1; if (sz == 0) sz = 1;
-  void *p = jit_malloc(jit, n * sz);
-  memset(p, 0, n * sz);
+static char *rt_strdup(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = rt_alloc(n);
+  memcpy(p, s, n);
   return p;
 }
 
-static void jit_free_rt(WidccJIT *jit) {
-  JitMallocBlock *b = jit->rt_blocks;
+static void *rt_alloc_tracked(WidccRT *rt, JitMallocBlock **list, size_t sz) {
+  if (sz == 0)
+    sz = 1;
+  void *p = calloc(1, sz);
+  if (!p)
+    error("widcc-jit: out of memory");
+  JitMallocBlock *b = rt_alloc(sizeof(*b));
+  b->ptr = p;
+  b->next = *list;
+  *list = b;
+  return p;
+}
+
+static void *rt_alloc_func(WidccRT *rt, size_t sz) {
+  return rt_alloc_tracked(rt, &rt->func_aux, sz);
+}
+
+static void *rt_alloc_data(WidccRT *rt, size_t sz) {
+  return rt_alloc_tracked(rt, &rt->data, sz);
+}
+
+static void rt_free_blocks(JitMallocBlock **list) {
+  JitMallocBlock *b = *list;
   while (b) {
+    JitMallocBlock *nx = b->next;
     free(b->ptr);
-    JitMallocBlock *nx = b->next; free(b);
+    free(b);
     b = nx;
   }
-  jit->rt_blocks = NULL;
+  *list = NULL;
 }
 
-// ---------- tiered release implementations ----------
-
-void widcc_jit_free_code(WidccJIT *jit) {
-  if (!jit) return;
-  for (JitCode *c = jit->codes; c; c = c->next)
-    sljit_free_code(c->code, NULL);
-  jit->codes = NULL;
+static void **rt_cell_alloc(void) {
+  void **p = calloc(1, sizeof(void *));
+  if (!p)
+    error("widcc-jit: out of memory");
+  return p;
 }
 
-void widcc_jit_free_rt(WidccJIT *jit) {
-  if (!jit) return;
-  jit_free_rt(jit);
-}
+// ------------------------------------------------------------------
+// Runtime symbol table
+// ------------------------------------------------------------------
 
-void widcc_jit_free_arena(WidccJIT *jit) {
-  if (!jit) return;
-  ccctx_destroy(&jit->cc);
-  ccctx_init(&jit->cc);
-  memset(&jit->syms, 0, sizeof(jit->syms));
-  jit->symlist = NULL;
-}
-
-// ---------- external-linkage symbol table ----------
-
-static JitSym *jit_sym(WidccJIT *jit, char *name) {
-  JitSym *s = hashmap_get(&jit->syms, name);
-  if (s) return s;
-  s = cc_calloc(1, sizeof(JitSym));
-  s->name = cc_strdup(name);
-  hashmap_put(&jit->syms, s->name, s);
-  s->next = jit->symlist; jit->symlist = s;
+static JitSym *jit_sym(WidccRT *rt, const char *name, bool is_func) {
+  JitSym *s = hashmap_get(&rt->syms, (char *)name);
+  if (s) {
+    if (is_func)
+      s->is_func = true;
+    return s;
+  }
+  s = rt_alloc(sizeof(*s));
+  memset(s, 0, sizeof(*s));
+  s->name = rt_strdup(name);
+  s->is_func = is_func;
+  hashmap_put(&rt->syms, s->name, s);
+  s->next = rt->symlist;
+  rt->symlist = s;
   return s;
 }
 
-static void **jit_sym_cell(JitSym *s, WidccJIT *jit) {
+static void **jit_sym_cell(JitSym *s) {
   if (!s->cell)
-    s->cell = jit_calloc(jit, 1, sizeof(void *));
+    s->cell = rt_cell_alloc();
   return s->cell;
 }
 
-// ---------- host resolution: instance → host ----------
+// Remove every symbol of one class, deleting map entries and releasing
+// per-symbol memory (name, indirection cell, entry itself).
+static void rt_drop_symbols(WidccRT *rt, bool funcs) {
+  JitSym **pp = &rt->symlist;
+  while (*pp) {
+    JitSym *s = *pp;
+    if (s->is_func == funcs) {
+      *pp = s->next;
+      hashmap_delete(&rt->syms, s->name);
+      free(s->cell);
+      free(s->name);
+      free(s);
+    } else {
+      pp = &s->next;
+    }
+  }
+}
 
-static void *jit_host_resolve(WidccJIT *jit, char *name) {
-  JitSym *s = hashmap_get(&jit->syms, name);
-  if (s && s->addr) return s->addr;
+
+void *widcc_rt_default_host_resolver(WidccRT *rt, const char *name) {
+  JitSym *s = hashmap_get(&rt->syms, (char *)name);
+  if (s && s->addr)
+    return s->addr;
 #ifdef _WIN32
   void *addr = (void *)GetProcAddress(GetModuleHandleA(NULL), name);
-  if (addr) return addr;
-  HMODULE mods[1024]; DWORD needed = 0;
+  if (addr)
+    return addr;
+  HMODULE mods[1024];
+  DWORD needed = 0;
   HANDLE proc = GetCurrentProcess();
   if (EnumProcessModules(proc, mods, sizeof(mods), &needed)) {
     int n = (int)(needed / sizeof(HMODULE));
-    if (n > 1024) n = 1024;
+    if (n > 1024)
+      n = 1024;
     for (int i = 0; i < n; i++) {
       addr = (void *)GetProcAddress(mods[i], name);
-      if (addr) return addr;
+      if (addr)
+        return addr;
     }
   }
   return NULL;
@@ -141,7 +164,105 @@ static void *jit_host_resolve(WidccJIT *jit, char *name) {
 #endif
 }
 
-// ---------- host-to-internal glue ----------
+void widcc_rt_set_host_resolver(void * (*resolve)(WidccRT *rt, const char *name)) {
+  jit_host_resolver = resolve;
+}
+
+
+// ---------- public runtime API ----------
+
+WidccRT *widcc_rt_new(void) {
+  WidccRT *rt = calloc(1, sizeof(WidccRT));
+  if (!rt)
+    return NULL;
+  hashmap_init_heap(&rt->syms);
+  return rt;
+}
+
+void widcc_rt_free(WidccRT *rt) {
+  if (!rt)
+    return;
+  widcc_rt_free_funcs(rt);
+  widcc_rt_free_vars(rt);
+  hashmap_destroy(&rt->syms);
+  free(rt);
+}
+
+int widcc_rt_add_func(WidccRT *rt, const char *name, void *fn) {
+  if (!rt || !name || !fn)
+    return -1;
+  JitSym *s = jit_sym(rt, name, true);
+  s->addr = fn;
+  s->is_tentative = false;
+  if (s->cell)
+    *s->cell = fn;
+  return 0;
+}
+
+int widcc_rt_add_var(WidccRT *rt, const char *name, void *var) {
+  if (!rt || !name || !var)
+    return -1;
+  JitSym *s = jit_sym(rt, name, false);
+  s->addr = var;
+  s->is_tentative = false;
+  if (s->cell)
+    *s->cell = var;
+  return 0;
+}
+
+void *widcc_rt_lookup(WidccRT *rt, const char *name) {
+  if (!rt || !name)
+    return NULL;
+  JitSym *s = hashmap_get(&rt->syms, (char *)name);
+  return s ? s->addr : NULL;
+}
+
+int widcc_rt_list_symbols(WidccRT *rt, char **names, int bufsize) {
+  if (!rt)
+    return 0;
+  int n = 0;
+  for (JitSym *s = rt->symlist; s; s = s->next) {
+    if (names && n < bufsize)
+      names[n] = s->name;
+    n++;
+  }
+  return n;
+}
+
+int widcc_rt_get_symbols_count(WidccRT *rt) {
+  if (!rt)
+    return 0;
+  int n = 0;
+  for (JitSym *s = rt->symlist; s; s = s->next)
+    n++;
+  return n;
+}
+
+void widcc_rt_free_funcs(WidccRT *rt) {
+  if (!rt)
+    return;
+  JitCode *c = rt->codes;
+  while (c) {
+    JitCode *nx = c->next;
+    sljit_free_code(c->code, NULL);
+    free(c);
+    c = nx;
+  }
+  rt->codes = NULL;
+  rt_free_blocks(&rt->func_aux);
+  rt_drop_symbols(rt, true);
+}
+
+void widcc_rt_free_vars(WidccRT *rt) {
+  if (!rt)
+    return;
+  rt_free_blocks(&rt->data);
+  rt_drop_symbols(rt, false);
+}
+
+// ------------------------------------------------------------------
+// Compiler
+// ------------------------------------------------------------------
 
 static File *jit_add_file(CCCtx *ctx, char *name, char *contents) {
   int n = ctx->file_no;
@@ -153,37 +274,40 @@ static File *jit_add_file(CCCtx *ctx, char *name, char *contents) {
   return file;
 }
 
-WidccJIT *widcc_jit_new(void) {
-  WidccJIT *jit = calloc(1, sizeof(WidccJIT));
-  if (!jit) return NULL;
-  ccctx_init(&jit->cc);
-  jit->cc.err_print = false;
-  return jit;
+WidccCompiler *widcc_cc_new(WidccRT *rt) {
+  if (!rt)
+    return NULL;
+  WidccCompiler *cc = calloc(1, sizeof(WidccCompiler));
+  if (!cc)
+    return NULL;
+  ccctx_init(&cc->cc);
+  cc->cc.err_print = false;
+  cc->rt = rt;
+  return cc;
 }
 
-void widcc_jit_free(WidccJIT *jit) {
-  if (!jit) return;
-  widcc_jit_free_code(jit);
-  widcc_jit_free_rt(jit);
-  if (jit->active_compiler) {
-    sljit_free_compiler(jit->active_compiler);
-    jit->active_compiler = NULL;
+void widcc_cc_free(WidccCompiler *cc) {
+  if (!cc)
+    return;
+  if (cc->active_compiler) {
+    sljit_free_compiler(cc->active_compiler);
+    cc->active_compiler = NULL;
   }
-  ccctx_destroy(&jit->cc);
-  free(jit);
+  ccctx_destroy(&cc->cc);
+  free(cc);
 }
 
-static int jit_compile_core(WidccJIT *jit, const char *name,
+static int jit_compile_core(WidccCompiler *cc, const char *name,
                             const char *source) {
-  CCCtx *ctx = &jit->cc;
+  CCCtx *ctx = &cc->cc;
   cc_ctx = ctx;
   ccctx_reset_frontend(ctx);
   ctx->err_active = true;
 
   if (setjmp(ctx->err_jmp)) {
-    if (jit->active_compiler) {
-      sljit_free_compiler(jit->active_compiler);
-      jit->active_compiler = NULL;
+    if (cc->active_compiler) {
+      sljit_free_compiler(cc->active_compiler);
+      cc->active_compiler = NULL;
     }
     ctx->err_active = false;
     cc_ctx = NULL;
@@ -203,49 +327,23 @@ static int jit_compile_core(WidccJIT *jit, const char *name,
 
   Token *tok = preprocess(head.next, (char *)name);
   Obj *prog = parse(tok);
-  jitgen_tu(jit, prog);
+  jitgen_tu(cc, prog);
 
   ctx->err_active = false;
   cc_ctx = NULL;
   return 0;
 }
 
-int widcc_jit_compile(WidccJIT *jit, const char *name, const char *source) {
-  if (!jit || !source) return -1;
-  return jit_compile_core(jit, name, source);
+int widcc_cc_compile(WidccCompiler *cc, const char *name, const char *source) {
+  if (!cc || !source)
+    return -1;
+  return jit_compile_core(cc, name, source);
 }
 
-const char *widcc_jit_error(WidccJIT *jit) {
-  if (!jit) return "widcc-jit: no instance";
-  return jit->cc.err_msg;
+const char *widcc_cc_error(WidccCompiler *cc) {
+  if (!cc)
+    return "widcc-jit: no compiler";
+  return cc->cc.err_msg;
 }
-
-void *widcc_jit_symbol(WidccJIT *jit, const char *name) {
-  if (!jit || !name) return NULL;
-  JitSym *s = hashmap_get(&jit->syms, (char *)name);
-  return (s && s->addr) ? s->addr : NULL;
-}
-
-int widcc_jit_map_symbol(WidccJIT *jit, const char *name, void *addr) {
-  if (!jit || !name || !addr) return -1;
-  cc_ctx = &jit->cc;
-  JitSym *s = jit_sym(jit, (char *)name);
-  s->addr = addr;
-  if (s->cell) *s->cell = addr;
-  else         *jit_sym_cell(s, jit) = addr;
-  cc_ctx = NULL;
-  return 0;
-}
-
-int widcc_jit_symbols_count(WidccJIT *jit) {
-  if (!jit) return -1;
-  return hashmap_size(&jit->syms);
-}
-
-void widcc_jit_list_symbols(WidccJIT *jit, char **names) {
-  if (!jit) return;
-  hashmap_keys(&jit->syms, names);
-}
-
 
 #endif // WIDCC_JIT_C

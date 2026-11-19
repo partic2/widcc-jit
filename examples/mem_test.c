@@ -1,86 +1,127 @@
-// Memory lifecycle test: exercises every public API path — compilation,
-// code generation, symbol tables, tiered release and error recovery — and
-// then releases everything. Run under LeakSanitizer (build with
-// -DWIDCC_SANITIZE=ON) to verify that the runtime reclaims all memory.
+// Memory lifecycle test: exercises every public API path — runtime symbol
+// registration, compilation, per-kind release, compiler/runtime
+// independence and error recovery — then releases everything. Run under
+// LeakSanitizer (build with -DWIDCC_SANITIZE=ON) to verify that the
+// runtime and compiler reclaim all memory independently.
 #include "widcc_jit.h"
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+// Always-evaluated check: unlike assert(), it survives -DNDEBUG, so API
+// calls placed inside it still run in release builds.
+#define CHECK(expr)                                                         \
+  do {                                                                      \
+    if (!(expr)) {                                                          \
+      fprintf(stderr, "check failed at %s:%d: %s\n", __FILE__, __LINE__,    \
+              #expr);                                                       \
+      return 1;                                                             \
+    }                                                                       \
+  } while (0)
 
 static int host_add(int a, int b) { return a + b; }
 
 int main(void) {
-  // 1. Empty instance lifecycle.
-  WidccJIT *jit = widcc_jit_new();
-  assert(jit);
-  widcc_jit_free(jit);
-  widcc_jit_free(NULL); // NULL-safe
+  // 1. Empty runtime/compiler lifecycle (all release calls are NULL-safe).
+  WidccRT *rt = widcc_rt_new();
+  WidccCompiler *cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
+  CHECK(widcc_cc_new(NULL) == NULL);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
+  widcc_rt_free(NULL);
+  widcc_cc_free(NULL);
 
   // 2. Repeated compile / execute / destroy rounds.
   for (int round = 0; round < 3; round++) {
-    jit = widcc_jit_new();
-    assert(jit);
-    assert(widcc_jit_compile(jit, "t.c",
+    rt = widcc_rt_new();
+    cc = widcc_cc_new(rt);
+    CHECK(rt && cc);
+    CHECK(widcc_cc_compile(cc, "t.c",
       "int g;\n"
       "int f(int x){ g+=x; return g*g; }\n"
       "double d(double a,double b){ return a*b+1.0; }\n") == 0);
-    int (*f)(int) = widcc_jit_symbol(jit, "f");
-    double (*d)(double, double) = widcc_jit_symbol(jit, "d");
-    assert(f && d);
-    assert(f(3) == 9);
-    assert(f(1) == 16);
-    assert(d(2.0, 3.0) == 7.0);
-    widcc_jit_free(jit);
+    int (*f)(int) = widcc_rt_lookup(rt, "f");
+    double (*d)(double, double) = widcc_rt_lookup(rt, "d");
+    CHECK(f && d);
+    CHECK(f(3) == 9);
+    CHECK(f(1) == 16);
+    CHECK(d(2.0, 3.0) == 7.0);
+    widcc_cc_free(cc);
+    widcc_rt_free(rt);
   }
 
-  // 3. Tiered release (code -> rt -> arena), then recompile.
-  jit = widcc_jit_new();
-  assert(widcc_jit_compile(jit, "a.c", "int one(void){ return 1; }\n") == 0);
-  int (*one)(void) = widcc_jit_symbol(jit, "one");
-  assert(one() == 1);
-  widcc_jit_free_code(jit);
-  widcc_jit_free_rt(jit);
-  widcc_jit_free_arena(jit);
-  assert(widcc_jit_compile(jit, "b.c", "int two(void){ return 2; }\n") == 0);
-  int (*two)(void) = widcc_jit_symbol(jit, "two");
-  assert(two() == 2);
-  widcc_jit_free(jit); // free again after the tiers were already released
+  // 3. Per-kind release (functions, then variables), then reuse the
+  // same runtime for another compilation.
+  rt = widcc_rt_new();
+  cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
+  CHECK(widcc_cc_compile(cc, "a.c", "int one(void){ return 1; }\n") == 0);
+  int (*one)(void) = widcc_rt_lookup(rt, "one");
+  CHECK(one() == 1);
+  widcc_rt_free_funcs(rt);
+  CHECK(widcc_rt_lookup(rt, "one") == NULL);
+  widcc_rt_free_vars(rt);
+  CHECK(widcc_cc_compile(cc, "b.c", "int two(void){ return 2; }\n") == 0);
+  int (*two)(void) = widcc_rt_lookup(rt, "two");
+  CHECK(two() == 2);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
 
-  // 4. Host symbol mapping and forward declarations across units.
-  jit = widcc_jit_new();
-  assert(widcc_jit_map_symbol(jit, "host_add", (void *)host_add) == 0);
-  assert(widcc_jit_compile(jit, "u1.c",
+  // 4. Host registration, forward declarations across units, and
+  // compiler/runtime independence: code produced by the compiler stays
+  // callable after the compiler is destroyed.
+  rt = widcc_rt_new();
+  cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
+  CHECK(widcc_rt_add_func(rt, "host_add", (void *)host_add) == 0);
+  CHECK(widcc_cc_compile(cc, "u1.c",
     "int host_add(int,int);\n"
     "int callee(int);\n"
     "int caller(int x){ return callee(x)+host_add(x,1); }\n") == 0);
-  assert(widcc_jit_compile(jit, "u2.c",
-    "int callee(int x){ return x*10; }\n") == 0);
-  int (*caller)(int) = widcc_jit_symbol(jit, "caller");
-  assert(caller && caller(4) == 45);
-  widcc_jit_free(jit);
+  CHECK(widcc_cc_compile(cc, "u2.c",
+    "int callee(int x){ return x*10; }\n"
+    "int tag(void){ static char s[] = \"abc\"; return s[1]; }\n") == 0);
+  CHECK(widcc_rt_list_symbols(rt, NULL, 0) >= 4);
+  widcc_cc_free(cc);
+  int (*caller)(int) = widcc_rt_lookup(rt, "caller");
+  CHECK(caller && caller(4) == 45);
+  // Static data produced during compilation is runtime-owned too.
+  int (*tag)(void) = widcc_rt_lookup(rt, "tag");
+  CHECK(tag && tag() == 'b');
+  widcc_rt_free(rt);
 
-  // 5. Error recovery: failed compiles must release their scratch state.
-  jit = widcc_jit_new();
+  // 5. Error recovery: failed compiles must release their scratch state
+  // while the runtime stays usable.
+  rt = widcc_rt_new();
+  cc = widcc_cc_new(rt);
+  CHECK(rt && cc);
   for (int i = 0; i < 5; i++) {
-    assert(widcc_jit_compile(jit, "bad.c", "int broken( {") == -1);
-    assert(strlen(widcc_jit_error(jit)) > 0);
+    CHECK(widcc_cc_compile(cc, "bad.c", "int broken( {") == -1);
+    CHECK(strlen(widcc_cc_error(cc)) > 0);
   }
-  assert(widcc_jit_compile(jit, "good.c",
+  CHECK(widcc_cc_compile(cc, "good.c",
     "int ok(void){ return 42; }\n") == 0);
-  int (*ok)(void) = widcc_jit_symbol(jit, "ok");
-  assert(ok && ok() == 42);
-  widcc_jit_free(jit);
+  int (*ok)(void) = widcc_rt_lookup(rt, "ok");
+  CHECK(ok && ok() == 42);
+  widcc_cc_free(cc);
+  widcc_rt_free(rt);
 
-  // 6. Several live instances do not share ownership.
-  WidccJIT *a = widcc_jit_new();
-  WidccJIT *b = widcc_jit_new();
-  assert(a && b);
-  assert(widcc_jit_compile(a, "a.c", "int fa(void){ return 1; }\n") == 0);
-  assert(widcc_jit_compile(b, "b.c", "int fb(void){ return 2; }\n") == 0);
-  assert(((int (*)(void))widcc_jit_symbol(a, "fa"))() == 1);
-  assert(((int (*)(void))widcc_jit_symbol(b, "fb"))() == 2);
-  widcc_jit_free(b);
-  widcc_jit_free(a);
+  // 6. Several live runtime/compiler pairs do not share ownership.
+  WidccRT *ra = widcc_rt_new();
+  WidccRT *rb = widcc_rt_new();
+  WidccCompiler *ca = widcc_cc_new(ra);
+  WidccCompiler *cb = widcc_cc_new(rb);
+  CHECK(ra && rb && ca && cb);
+  CHECK(widcc_cc_compile(ca, "a.c", "int fa(void){ return 1; }\n") == 0);
+  CHECK(widcc_cc_compile(cb, "b.c", "int fb(void){ return 2; }\n") == 0);
+  CHECK(((int (*)(void))widcc_rt_lookup(ra, "fa"))() == 1);
+  CHECK(((int (*)(void))widcc_rt_lookup(rb, "fb"))() == 2);
+  CHECK(widcc_rt_lookup(ra, "fb") == NULL);
+  CHECK(widcc_rt_lookup(rb, "fa") == NULL);
+  widcc_cc_free(cb);
+  widcc_rt_free(rb);
+  widcc_cc_free(ca);
+  widcc_rt_free(ra);
 
   printf("mem: all tests passed\n");
   return 0;
