@@ -178,7 +178,7 @@ static struct sljit_label *lchk(struct sljit_label *l) {
   return l;
 }
 
-static void unsupported(Node *node, char *what) {
+static void NORETURN unsupported(Node *node, char *what) {
   error_tok(node->tok, "not supported by the JIT backend: %s", what);
 }
 
@@ -604,7 +604,7 @@ static void func_addr(JGen *g, Obj *var) {
                            SLJIT_IMM, (sljit_sw)s->addr));
       return;
     }
-    void *host = (*jit_host_resolver)(rt, var->name);
+    void *host = jit_resolve_host(rt, var->name);
     if (host) {
       s->addr = host;
       JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_R0, 0,
@@ -652,7 +652,7 @@ static void global_addr(JGen *g, Obj *var) {
   JitSym *s = jit_sym(rt, var->name, false);
   void *addr = s->addr;
   if (!addr) {
-    addr = (*jit_host_resolver)(rt, var->name);
+    addr = jit_resolve_host(rt, var->name);
     if (addr)
       s->addr = addr;
   }
@@ -1385,7 +1385,6 @@ static void gen_cond_truth(JGen *g, Node *cond) {
 
 // i64 ? : with both branches yielding 64-bit values.
 static void gen_i64_cond(JGen *g, Node *node) {
-  int mark = g->i64_top;
   gen_cond_truth(g, node->cond);
   struct sljit_jump *jels = jchk(sljit_emit_cmp(g->C, SLJIT_EQUAL,
                                                    SLJIT_R0, 0, SLJIT_IMM, 0));
@@ -2821,7 +2820,7 @@ static void *resolve_reloc_target(JTU *tu, Obj *prog, char *name, Obj **target_o
   JitSym *s = jit_sym(tu->rt, name, target && target->ty->kind == TY_FUNC);
   if (s->addr)
     return s->addr;
-  void *host = (*jit_host_resolver)(tu->rt, name);
+  void *host = jit_resolve_host(tu->rt, name);
   if (host) {
     s->addr = host;
     return host;

@@ -81,12 +81,7 @@ typedef struct CCCtx {
 
 // The runtime is built as a single translation unit (src/all.c), so every
 // internal symbol has internal linkage: only the widcc_jit.h API is global.
-static _Thread_local CCCtx *cc_ctx;
-static CCCtx cc_default_ctx;
-
-static inline CCCtx *ccctx(void) {
-  return cc_ctx ? cc_ctx : &cc_default_ctx;
-}
+static CCCtx *ccctx(void);
 
 // Arena allocation API (uses ccctx()).
 static void *cc_malloc(size_t size);

@@ -55,16 +55,28 @@ int widcc_rt_add_var(WidccRT *rt, const char *name, void *var);
 void *widcc_rt_lookup(WidccRT *rt, const char *name);
 
 // Copy up to `bufsize` symbol names into `names` (newest first) and
-// return the total number of symbols in the runtime.
+// return the total number of symbols in the runtime. Pass names=NULL to
+// just count.
 int widcc_rt_list_symbols(WidccRT *rt, char **names, int bufsize);
 
-// Get the total number of symbols in the runtime.
-int widcc_rt_get_symbols_count(WidccRT *rt);
+// Set the default directory search list for #include used by later
+// compilations of this runtime. The paths are copied. A quoted
+// #include "..." first searches the including file's directory and then
+// this list; #include <...> searches only this list. Pass NULL with
+// count 0 to clear it. Returns 0 on success, -1 on invalid arguments or
+// allocation failure.
+int widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
+                               int count);
 
+// Replace how this runtime resolves names that are missing from its
+// symbol map. The default looks the name up in the host process (dlsym
+// on Unix, exported modules on Windows); callers can chain to it with
+// widcc_rt_default_host_resolver(). Pass NULL to restore the default.
+// The resolver applies to later compilations of this runtime.
+void widcc_rt_set_host_resolver(WidccRT *rt,
+                                void *(*resolve)(WidccRT *, const char *));
 
-
-void widcc_rt_set_host_resolver(void * (*resolve)(WidccRT *rt, const char *name));
-
+// The default resolver: runtime symbols first, then the host process.
 void *widcc_rt_default_host_resolver(WidccRT *rt, const char *name);
 
 // Release generated function code and drop all function entries
@@ -88,12 +100,20 @@ WidccCompiler *widcc_cc_new(WidccRT *rt);
 void widcc_cc_free(WidccCompiler *cc);
 
 // Compile a translation unit from a NUL-terminated C source string.
-// `name` is used in diagnostics. Symbols registered in the compiler's
-// runtime are visible to the unit; unresolved externs are then looked
-// up in the host process (dlsym on Unix, exported symbols on Windows).
-// Definitions produced by the unit are added to the runtime.
+// `path` names the unit: it is used in diagnostics and as the base
+// directory for quoted #include directives, but the file is not read
+// (the string is the file's contents). Symbols registered in the
+// compiler's runtime are visible to the unit; unresolved externs are
+// then looked up in the host process (dlsym on Unix, exported symbols on
+// Windows). Definitions produced by the unit are added to the runtime.
 // Returns 0 on success, -1 on error (see widcc_cc_error()).
-int widcc_cc_compile(WidccCompiler *cc, const char *name, const char *source);
+int widcc_cc_compile(WidccCompiler *cc, const char *path, const char *source);
+
+// Compile a translation unit read from `path` on disk. The path is used
+// in diagnostics and as the base directory for quoted #include
+// directives. Returns 0 on success, -1 on error (unreadable file, syntax
+// error, ...; see widcc_cc_error()).
+int widcc_cc_compile_file(WidccCompiler *cc, const char *path);
 
 // The last error message of this compiler.
 const char *widcc_cc_error(WidccCompiler *cc);

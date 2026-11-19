@@ -44,6 +44,12 @@ struct WidccRT {
   JitCode *codes;               // generated machine code blocks
   JitMallocBlock *func_aux;     // runtime-owned scratch used by functions
   JitMallocBlock *data;         // generated global data blocks
+  // Default #include search list; runtime-owned copies.
+  char **inc_paths;
+  int inc_count;
+  // Optional per-runtime host resolver; NULL means the default
+  // process-wide lookup.
+  void *(*host_resolve)(WidccRT *rt, const char *name);
 };
 
 struct WidccCompiler {
@@ -76,6 +82,7 @@ static void **rt_cell_alloc(void);
 // function flag once set.
 static JitSym *jit_sym(WidccRT *rt, const char *name, bool is_func);
 static void **jit_sym_cell(JitSym *s);
+static void *jit_resolve_host(WidccRT *rt, const char *name);
 
 
 // Address of the trap executed when JIT code calls an unresolved function.
@@ -83,7 +90,5 @@ static void *jit_undefined_fn_addr(void);
 
 // Generate machine code for a whole parsed translation unit.
 static void jitgen_tu(WidccCompiler *cc, Obj *prog);
-
-void *(*jit_host_resolver)(WidccRT *rt, const char *name)=widcc_rt_default_host_resolver;
 
 #endif

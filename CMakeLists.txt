@@ -20,7 +20,7 @@
 #   cmake --build build -j
 #   ./build/jit_test      # runs the functional test suite
 cmake_minimum_required(VERSION 3.14)
-project(widcc C CXX)
+project(widcc C)
 
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED OFF)
@@ -40,6 +40,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 else()
   set(WIDCC_PLATFORM_CFLAGS -D_GNU_SOURCE)
   set(WIDCC_PLATFORM_LIBS dl)
+endif()
+
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  set(WIDCC_WARNINGS -Wall -Wextra -Wno-switch)
+else()
+  set(WIDCC_WARNINGS "")
 endif()
 
 # ---------- optional 32-bit (ILP32) host build ----------
@@ -75,7 +81,7 @@ target_include_directories(sljit PRIVATE sljit/sljit_src)
 # symbols are static. Only the widcc_jit.h API is exported.
 
 add_library(widcc_jit STATIC src/all.c $<TARGET_OBJECTS:sljit>)
-target_compile_options(widcc_jit PRIVATE -Wno-switch)
+target_compile_options(widcc_jit PRIVATE ${WIDCC_WARNINGS})
 target_compile_definitions(widcc_jit PRIVATE ${WIDCC_PLATFORM_CFLAGS})
 target_include_directories(widcc_jit
   PRIVATE sljit/sljit_src ${CMAKE_CURRENT_SOURCE_DIR}
@@ -95,10 +101,12 @@ if(WIDCC_BUILD_TESTS)
 
   add_executable(jit_test examples/jit_test.c)
   target_link_libraries(jit_test PRIVATE widcc_jit)
+  target_compile_options(jit_test PRIVATE ${WIDCC_WARNINGS})
   add_test(NAME jit_test COMMAND jit_test)
 
   add_executable(stress_svalue examples/stress_svalue.c)
   target_link_libraries(stress_svalue PRIVATE widcc_jit)
+  target_compile_options(stress_svalue PRIVATE ${WIDCC_WARNINGS})
   if(UNIX)
     target_link_libraries(stress_svalue PRIVATE m)
   endif()
@@ -106,5 +114,6 @@ if(WIDCC_BUILD_TESTS)
 
   add_executable(mem_test examples/mem_test.c)
   target_link_libraries(mem_test PRIVATE widcc_jit)
+  target_compile_options(mem_test PRIVATE ${WIDCC_WARNINGS})
   add_test(NAME mem_test COMMAND mem_test)
 endif()

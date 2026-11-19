@@ -9,6 +9,10 @@
 static _Thread_local CCCtx *cc_ctx;
 static CCCtx cc_default_ctx;
 
+// Compiler instances run on their own thread; the default context only
+// backs frontend calls made outside a compilation (where errors exit).
+static CCCtx *ccctx(void) { return cc_ctx ? cc_ctx : &cc_default_ctx; }
+
 static void *cc_malloc(size_t size) {
   CCArenaBlk *blk = malloc(sizeof(CCArenaBlk) + size);
   if (!blk)
@@ -58,6 +62,8 @@ static void ccctx_init(CCCtx *ctx) {
 // Reset all per-compilation frontend state. The arena and everything
 // allocated from it (including the instance symbol tables) is kept.
 static void ccctx_reset_frontend(CCCtx *ctx) {
+  ctx->err_msg[0] = '\0';
+
   ctx->current_file = NULL;
   ctx->input_files = NULL;
   ctx->tok_at_bol = true;
@@ -70,6 +76,7 @@ static void ccctx_reset_frontend(CCCtx *ctx) {
   ctx->cond_incl = NULL;
   memset(&ctx->pragma_once, 0, sizeof(HashMap));
   memset(&ctx->include_guards, 0, sizeof(HashMap));
+  memset(&ctx->incl_path_cache, 0, sizeof(HashMap));
   ctx->base_file = NULL;
   ctx->pp_counter = 0;
 

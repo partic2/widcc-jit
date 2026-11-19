@@ -24,27 +24,41 @@
 #define WIDCC_SIZEOF_PTRDIFF_T WIDCC_STR(__SIZEOF_PTRDIFF_T__)
 #endif
 
-static Type *ty_void = &(Type){TY_VOID, 1, 1};
-static Type *ty_bool = &(Type){TY_BOOL, 1, 1, true};
+static Type *ty_void = &(Type){.kind = TY_VOID, .size = 1, .align = 1};
+static Type *ty_bool =
+    &(Type){.kind = TY_BOOL, .size = 1, .align = 1, .is_unsigned = true};
 
-static Type *ty_pchar = &(Type){TY_PCHAR, 1, 1};
+static Type *ty_pchar = &(Type){.kind = TY_PCHAR, .size = 1, .align = 1};
 
-static Type *ty_char = &(Type){TY_CHAR, 1, 1};
-static Type *ty_short = &(Type){TY_SHORT, 2, 2};
-static Type *ty_int = &(Type){TY_INT, 4, 4};
+static Type *ty_char = &(Type){.kind = TY_CHAR, .size = 1, .align = 1};
+static Type *ty_short = &(Type){.kind = TY_SHORT, .size = 2, .align = 2};
+static Type *ty_int = &(Type){.kind = TY_INT, .size = 4, .align = 4};
 // `long` is 8 bytes on LP64 and 4 bytes on both LLP64 and ILP32.
-static Type *ty_long = &(Type){TY_LONG, sizeof(long), sizeof(long)};
-static Type *ty_llong = &(Type){TY_LONGLONG, sizeof(long long), sizeof(long long)};
+static Type *ty_long = &(Type){.kind = TY_LONG,
+                               .size = sizeof(long),
+                               .align = sizeof(long)};
+static Type *ty_llong = &(Type){.kind = TY_LONGLONG,
+                                .size = sizeof(long long),
+                                .align = sizeof(long long)};
 
-static Type *ty_uchar = &(Type){TY_CHAR, 1, 1, true};
-static Type *ty_ushort = &(Type){TY_SHORT, 2, 2, true};
-static Type *ty_uint = &(Type){TY_INT, 4, 4, true};
-static Type *ty_ulong = &(Type){TY_LONG, sizeof(unsigned long), sizeof(unsigned long), true};
-static Type *ty_ullong = &(Type){TY_LONGLONG, sizeof(unsigned long long), sizeof(unsigned long long), true};
+static Type *ty_uchar =
+    &(Type){.kind = TY_CHAR, .size = 1, .align = 1, .is_unsigned = true};
+static Type *ty_ushort =
+    &(Type){.kind = TY_SHORT, .size = 2, .align = 2, .is_unsigned = true};
+static Type *ty_uint =
+    &(Type){.kind = TY_INT, .size = 4, .align = 4, .is_unsigned = true};
+static Type *ty_ulong = &(Type){.kind = TY_LONG,
+                                .size = sizeof(unsigned long),
+                                .align = sizeof(unsigned long),
+                                .is_unsigned = true};
+static Type *ty_ullong = &(Type){.kind = TY_LONGLONG,
+                                 .size = sizeof(unsigned long long),
+                                 .align = sizeof(unsigned long long),
+                                 .is_unsigned = true};
 
-static Type *ty_float = &(Type){TY_FLOAT, 4, 4};
-static Type *ty_double = &(Type){TY_DOUBLE, 8, 8};
-static Type *ty_ldouble = &(Type){TY_LDOUBLE, 16, 16};
+static Type *ty_float = &(Type){.kind = TY_FLOAT, .size = 4, .align = 4};
+static Type *ty_double = &(Type){.kind = TY_DOUBLE, .size = 8, .align = 8};
+static Type *ty_ldouble = &(Type){.kind = TY_LDOUBLE, .size = 16, .align = 16};
 
 static Type *ty_size_t;
 static Type *ty_intptr_t;
@@ -54,12 +68,7 @@ static Type *ty_ptrdiff_t;
 // the host it runs on: LP64 on 64-bit Unix, LLP64 on 64-bit Windows and
 // ILP32 on a 32-bit host.
 static void init_ty(void) {
-#if defined(_WIN64)
-  // LLP64 does not define the LP64 feature macros.
-#elif defined(__LP64__) || defined(_LP64)
-  define_macro("_LP64", "1");
-  define_macro("__LP64__", "1");
-#endif
+  // Platform feature macros (including _LP64) come from init_macros().
   define_macro("__SIZEOF_DOUBLE__", "8");
   define_macro("__SIZEOF_FLOAT__", "4");
   define_macro("__SIZEOF_INT__", "4");
@@ -128,6 +137,7 @@ static bool is_bitfield2(Node *node, int *width) {
       stmt = stmt->next;
     if (stmt->kind == ND_EXPR_STMT)
       return is_bitfield2(stmt->lhs, width);
+    return false;
   }
   case ND_MEMBER:
     if (!node->member->is_bitfield)

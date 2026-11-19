@@ -859,10 +859,6 @@ static char *search_include_paths2(char *filename, Token *start, bool is_dquote,
   return search_include_paths3(filename, incl_no);
 }
 
-static char *search_include_paths(char *filename) {
-  return search_include_paths3(filename, NULL);
-}
-
 static char *search_include_next(char *filename, char *cur_file, int *idx) {
   for (; *idx < ccctx()->include_paths.len; (*idx)++) {
     char *path = format("%s/%s", ccctx()->include_paths.data[*idx], filename);
@@ -1258,7 +1254,7 @@ static Token *stdver_macro(Token *tok) {
 
 static Token *pragma_macro(Token *start) {
   Token *tok = start->next;
-  Token *str;
+  Token *str = NULL;
   for (int progress = 0;;) {
     if (tok->kind == TK_EOF)
       error_tok(start, "unterminated _Pragma sequence");

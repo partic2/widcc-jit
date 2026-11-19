@@ -2,8 +2,8 @@
 //
 // Covers: arithmetic, control flow, functions/recursion, forward references
 // across translation units, structs, arrays, pointers, strings, global
-// variables, host symbol registration, repeated compilation, and per-kind
-// runtime release.
+// variables, host symbol registration (including per-runtime resolvers),
+// repeated compilation, and per-kind runtime release.
 #include "widcc_jit.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,8 +45,22 @@ typedef struct {
 
 // Host symbols.
 static int host_add(int a, int b) { return a + b; }
+static int host_sub(int a, int b) { return a - b; }
 static volatile int host_counter = 0;
 static void host_bump(void) { host_counter++; }
+
+// Per-runtime resolvers: both claim "picked", with different targets.
+static void *resolve_add(WidccRT *rt, const char *name) {
+  if (!strcmp(name, "picked"))
+    return (void *)host_add;
+  return widcc_rt_default_host_resolver(rt, name);
+}
+
+static void *resolve_sub(WidccRT *rt, const char *name) {
+  if (!strcmp(name, "picked"))
+    return (void *)host_sub;
+  return widcc_rt_default_host_resolver(rt, name);
+}
 
 static void test_arith_control(JIT *jit) {
   CHECK_COMPILE(jit, "arith.c",
@@ -256,6 +270,35 @@ static void test_host_symbols(JIT *jit) {
   CHECK(bump_host() == before + 2);
 }
 
+static void test_host_resolver(void) {
+  // The resolver is per-runtime: two runtimes resolve the same extern to
+  // different host functions without affecting each other.
+  WidccRT *ra = widcc_rt_new();
+  WidccRT *rb = widcc_rt_new();
+  WidccCompiler *ca = widcc_cc_new(ra);
+  WidccCompiler *cb = widcc_cc_new(rb);
+  CHECK(ra && rb && ca && cb);
+  widcc_rt_set_host_resolver(ra, resolve_add);
+  widcc_rt_set_host_resolver(rb, resolve_sub);
+
+  const char *src =
+    "int picked(int, int);\n"
+    "int use_pick(int a, int b) { return picked(a, b); }\n";
+  CHECK(widcc_cc_compile(ca, "pick_a.c", src) == 0);
+  CHECK(widcc_cc_compile(cb, "pick_b.c", src) == 0);
+
+  int (*ua)(int, int) = widcc_rt_lookup(ra, "use_pick");
+  int (*ub)(int, int) = widcc_rt_lookup(rb, "use_pick");
+  CHECK(ua && ub);
+  CHECK(ua(10, 3) == 13);
+  CHECK(ub(10, 3) == 7);
+
+  widcc_cc_free(cb);
+  widcc_rt_free(rb);
+  widcc_cc_free(ca);
+  widcc_rt_free(ra);
+}
+
 static void test_recompile(JIT *jit) {
   CHECK_COMPILE(jit, "v1.c", "int version(void) { return 1; }\n");
   int (*v1)(void) = widcc_rt_lookup(jit->rt, "version");
@@ -273,6 +316,77 @@ static void test_error_recovery(JIT *jit) {
   CHECK_COMPILE(jit, "ok.c", "int still_ok(void) { return 7; }\n");
   int (*still_ok)(void) = widcc_rt_lookup(jit->rt, "still_ok");
   CHECK(still_ok && still_ok() == 7);
+}
+
+static void test_compile_file(JIT *jit) {
+  const char *hdr = "widcc_cf_hdr.h";
+  const char *src = "widcc_cf_main.c";
+
+  FILE *f = fopen(hdr, "w");
+  CHECK(f != NULL);
+  fputs("#ifndef WIDCC_CF_HDR_H\n"
+        "#define WIDCC_CF_HDR_H\n"
+        "static int hdr_val(void) { return 7; }\n"
+        "#endif\n", f);
+  fclose(f);
+
+  f = fopen(src, "w");
+  CHECK(f != NULL);
+  fputs("#include \"widcc_cf_hdr.h\"\n"
+        "int file_sum(int a, int b) { return a + b + hdr_val(); }\n", f);
+  fclose(f);
+
+  // Quoted #include directives resolve relative to the compiled file.
+  CHECK(widcc_cc_compile_file(jit->cc, src) == 0);
+  int (*file_sum)(int, int) = widcc_rt_lookup(jit->rt, "file_sum");
+  CHECK(file_sum && file_sum(2, 3) == 12);
+
+  // An unreadable path is a normal compile error, not a process exit.
+  CHECK(widcc_cc_compile_file(jit->cc, "widcc_no_such_file_xyz.c") == -1);
+  CHECK(strlen(widcc_cc_error(jit->cc)) > 0);
+  CHECK(widcc_cc_compile_file(jit->cc, NULL) == -1);
+
+  remove(hdr);
+  remove(src);
+}
+
+static void test_include_paths(JIT *jit) {
+  const char *hdr = "widcc_inc_hdr.h";
+  FILE *f = fopen(hdr, "w");
+  CHECK(f != NULL);
+  fputs("static int inc_val(void) { return 9; }\n", f);
+  fclose(f);
+
+  const char *angle =
+    "#include <widcc_inc_hdr.h>\n"
+    "int inc_angle(void) { return inc_val(); }\n";
+  const char *quote =
+    "#include \"widcc_inc_hdr.h\"\n"
+    "int inc_quote(void) { return inc_val(); }\n";
+
+  // The string form treats its path as the file name: a quoted include
+  // resolves relative to it even though the file does not exist on disk.
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", quote) == 0);
+  int (*inc_quote)(void) = widcc_rt_lookup(jit->rt, "inc_quote");
+  CHECK(inc_quote && inc_quote() == 9);
+
+  // Angle includes search only the configured list, which starts empty.
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == -1);
+  const char *paths[] = {"."};
+  CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == 0);
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == 0);
+  int (*inc_angle)(void) = widcc_rt_lookup(jit->rt, "inc_angle");
+  CHECK(inc_angle && inc_angle() == 9);
+
+  // Invalid arguments are rejected; NULL/0 clears the list.
+  CHECK(widcc_rt_set_include_paths(NULL, paths, 1) == -1);
+  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 1) == -1);
+  const char *bad[] = {NULL};
+  CHECK(widcc_rt_set_include_paths(jit->rt, bad, 1) == -1);
+  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == 0);
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == -1);
+
+  remove(hdr);
 }
 
 static void test_runtime_release(void) {
@@ -714,7 +828,7 @@ static void test_int64_semantics(JIT *jit) {
   i64_binops();
   CHECK(*g_add == a + b);
   CHECK(*g_sub == a - b);
-  CHECK(*g_mul == a * b);
+  CHECK(*g_mul == (long long)((unsigned long long)a * (unsigned long long)b));
   CHECK(*g_div == a / b);
   CHECK(*g_mod == a % b);
   CHECK(*g_and == (a & b));
@@ -781,8 +895,11 @@ int main(void) {
   test_strings_globals(&jit);
   test_float(&jit);
   test_host_symbols(&jit);
+  test_host_resolver();
   test_recompile(&jit);
   test_error_recovery(&jit);
+  test_compile_file(&jit);
+  test_include_paths(&jit);
   test_sorting(&jit);
   test_nested_loops(&jit);
   test_int32_semantics(&jit);

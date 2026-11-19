@@ -119,7 +119,7 @@ static void warn_tok(Token *tok, char *fmt, ...) {
 
 // Consumes the current token if it matches `op`.
 static bool equal(Token *tok, char *op) {
-  return strlen(op) == tok->len && !memcmp(tok->loc, op, tok->len);
+  return (size_t)tok->len == strlen(op) && !memcmp(tok->loc, op, tok->len);
 }
 
 // Ensure that the current token is `op`.
@@ -189,6 +189,7 @@ static int read_punct(char *p) {
   case '-':
     if (p[1] == '>')
       return 2;
+    // fall through
   case '&':
   case '+':
   case '=':
@@ -198,6 +199,7 @@ static int read_punct(char *p) {
   case '>':
     if (is_repeat)
       return (p[2] == '=') + 2;
+    // fall through
   case '!':
   case '%':
   case '*':
@@ -244,7 +246,7 @@ static bool is_keyword(Token *tok) {
       "__asm", "__asm__", "__typeof", "__typeof__", "inline",
     };
 
-    for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
+    for (size_t i = 0; i < sizeof(kw) / sizeof(*kw); i++)
       hashmap_put(map, kw[i], (void *)1);
 
     if (ccctx()->opt_std == STD_NONE)

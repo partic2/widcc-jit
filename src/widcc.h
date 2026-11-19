@@ -8,10 +8,6 @@
 #include <ctype.h>
 #include <errno.h>
 #ifndef _WIN32
-#include <glob.h>
-#endif
-#include <inttypes.h>
-#ifndef _WIN32
 #include <libgen.h>
 #endif
 #include <stdarg.h>
@@ -23,9 +19,6 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#ifndef _WIN32
-#include <sys/wait.h>
-#endif
 #include <time.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -131,7 +124,6 @@ struct File {
   File *display_file;
   int line_delta;
   bool is_input;
-  bool is_syshdr;
 };
 
 // Token type
@@ -181,7 +173,6 @@ static bool is_keyword(Token *tok);
 // preprocess.c
 //
 
-static char *search_include_paths(char *filename);
 static void init_macros(void);
 static void define_macro(char *name, char *buf);
 static void undef_macro(char *name);
@@ -209,8 +200,6 @@ struct Obj {
   Obj *param_next;
   Obj *param_promoted;
   Obj *vla_next;
-  bool pass_by_stack;
-  int stack_offset;
   Node *arg_expr;
 
   // Global variable or function
@@ -506,7 +495,6 @@ static Type *new_type(TypeKind kind, int size, int align);
 // unicode.c
 //
 
-static int encode_utf8(char *buf, uint32_t c);
 static uint32_t decode_utf8(char **new_pos, char *p);
 static bool is_ident1(uint32_t c);
 static bool is_ident2(uint32_t c);

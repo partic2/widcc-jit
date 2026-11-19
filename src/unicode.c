@@ -6,33 +6,6 @@
 #define MASK(bits) (uint8_t)((1 << (bits)) - 1)
 #define MASK2(bits, shift) (uint8_t)(MASK(bits) << (shift))
 
-// Encode a given character in UTF-8.
-static int encode_utf8(char *buf, uint32_t c) {
-  if (c <= 0x7F) {
-    buf[0] = c;
-    return 1;
-  }
-
-  if (c <= 0x7FF) {
-    buf[0] = MASK2(2, 6) | (c >> 6);
-    buf[1] = MASK2(1, 7) | (c & MASK(6));
-    return 2;
-  }
-
-  if (c <= 0xFFFF) {
-    buf[0] = MASK2(3, 5) | (c >> 12);
-    buf[1] = MASK2(1, 7) | ((c >> 6) & MASK(6));
-    buf[2] = MASK2(1, 7) | (c & MASK(6));
-    return 3;
-  }
-
-  buf[0] = MASK2(4, 4) | (c >> 18);
-  buf[1] = MASK2(1, 7) | ((c >> 12) & MASK(6));
-  buf[2] = MASK2(1, 7) | ((c >> 6) & MASK(6));
-  buf[3] = MASK2(1, 7) | (c & MASK(6));
-  return 4;
-}
-
 // Read a UTF-8-encoded Unicode code point from a source file.
 // We assume that source files are always in UTF-8.
 //
@@ -73,9 +46,10 @@ static uint32_t decode_utf8(char **new_pos, char *p) {
   return c;
 }
 
-// Values "range" points to must be in ascending order
+// Values "range" points to must be in ascending order; (uint32_t)-1 ends
+// the array.
 static bool in_ordered_range(uint32_t *range, uint32_t c) {
-  for (int i = 0; range[i] != -1; i += 2) {
+  for (int i = 0; range[i] != (uint32_t)-1; i += 2) {
     if (c > range[i + 1])
       continue;
     if (range[i] <= c)

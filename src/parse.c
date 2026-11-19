@@ -1444,7 +1444,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     assert(!init->expr);
     Node *node = NULL;
     for (int i = 0; i < ty->array_len; i++) {
-      InitDesg desg2 = {desg, i};
+      InitDesg desg2 = {.next = desg, .idx = i};
       chain_expr(&node, create_lvar_init(init->children[i], ty->base, &desg2, tok));
     }
     return node;
@@ -1458,7 +1458,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
   if (ty->kind == TY_STRUCT) {
     Node *node = NULL;
     for (Member *mem = ty->members; mem; mem = mem->next) {
-      InitDesg desg2 = {desg, 0, mem};
+      InitDesg desg2 = {.next = desg, .member = mem};
       chain_expr(&node, create_lvar_init(init->children[mem->idx], mem->ty, &desg2, tok));
     }
     return node;
@@ -1467,7 +1467,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
   if (ty->kind == TY_UNION) {
     if (!init->mem)
       return NULL;
-    InitDesg desg2 = {desg, 0, init->mem};
+    InitDesg desg2 = {.next = desg, .member = init->mem};
     return create_lvar_init(init->children[init->mem->idx], init->mem->ty, &desg2, tok);
   }
 
@@ -1620,7 +1620,7 @@ static bool is_typename(Token *tok) {
       "_Thread_local", "__thread", "__typeof", "__typeof__"
     };
 
-    for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
+    for (size_t i = 0; i < sizeof(kw) / sizeof(*kw); i++)
       hashmap_put(map, kw[i], (void *)1);
 
     if (ccctx()->opt_std == STD_NONE || ccctx()->opt_std >= STD_C23)
@@ -1779,7 +1779,7 @@ static Node *stmt(Token **rest, Token *tok, bool chained) {
         begin = (uint32_t)begin, end = (uint32_t)end;
     }
     if ((!cond_ty->is_unsigned && (end < begin)) ||
-      ((cond_ty->is_unsigned && ((uint64_t)end < begin))))
+      ((cond_ty->is_unsigned && ((uint64_t)end < (uint64_t)begin))))
       error_tok(tok, "empty case range specified");
 
     tok = skip(tok, ":");
@@ -2115,25 +2115,25 @@ static int64_t eval2(Node *node, char ***label) {
     if (is_flonum(node->lhs->ty))
       return eval_double(node->lhs) < eval_double(node->rhs);
     if (node->lhs->ty->is_unsigned)
-      return (uint64_t)eval(node->lhs) < eval(node->rhs);
+      return (uint64_t)eval(node->lhs) < (uint64_t)eval(node->rhs);
     return eval(node->lhs) < eval(node->rhs);
   case ND_LE:
     if (is_flonum(node->lhs->ty))
       return eval_double(node->lhs) <= eval_double(node->rhs);
     if (node->lhs->ty->is_unsigned)
-      return (uint64_t)eval(node->lhs) <= eval(node->rhs);
+      return (uint64_t)eval(node->lhs) <= (uint64_t)eval(node->rhs);
     return eval(node->lhs) <= eval(node->rhs);
   case ND_GT:
     if (is_flonum(node->lhs->ty))
       return eval_double(node->lhs) > eval_double(node->rhs);
     if (node->lhs->ty->is_unsigned)
-      return (uint64_t)eval(node->lhs) > eval(node->rhs);
+      return (uint64_t)eval(node->lhs) > (uint64_t)eval(node->rhs);
     return eval(node->lhs) > eval(node->rhs);
   case ND_GE:
     if (is_flonum(node->lhs->ty))
       return eval_double(node->lhs) >= eval_double(node->rhs);
     if (node->lhs->ty->is_unsigned)
-      return (uint64_t)eval(node->lhs) >= eval(node->rhs);
+      return (uint64_t)eval(node->lhs) >= (uint64_t)eval(node->rhs);
     return eval(node->lhs) >= eval(node->rhs);
   case ND_COND:
     return eval(node->cond) ? eval2(node->then, label) : eval2(node->els, label);

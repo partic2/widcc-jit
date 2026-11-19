@@ -32,7 +32,8 @@ static void strarray_push(StringArray *arr, char *s) {
   arr->data[arr->len++] = s;
 }
 
-// Takes a printf-style format string and returns a formatted string.
+// Takes a printf-style format string and returns a formatted string
+// allocated from the instance arena.
 static char *format(char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -48,19 +49,10 @@ static char *format(char *fmt, ...) {
     return NULL;
   }
 
-  char *buf = (char *)malloc((size_t)len + 1);
-  if (!buf) {
-    va_end(ap2);
-    return NULL;
-  }
-
-  // Second pass: actually format.
+  // Second pass: format straight into arena memory.
+  char *buf = cc_malloc((size_t)len + 1);
   vsnprintf(buf, (size_t)len + 1, fmt, ap2);
   va_end(ap2);
-
-  // Move to the instance arena so it is released with the instance.
-  char *ret = cc_strdup(buf);
-  free(buf);
-  return ret;
+  return buf;
 }
 #endif // WIDCC_STRINGS_C
