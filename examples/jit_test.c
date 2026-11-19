@@ -28,9 +28,9 @@ typedef struct {
 
 #define CHECK_COMPILE(jit, name, src)                                       \
   do {                                                                      \
-    if (widcc_cc_compile((jit)->cc, name, src) != 0) {                      \
-      fprintf(stderr, "compile %s failed: %s\n", name,                      \
-              widcc_cc_error((jit)->cc));                                   \
+    const char *err = widcc_cc_compile((jit)->cc, name, src);               \
+    if (err) {                                                              \
+      fprintf(stderr, "compile %s failed: %s\n", name, err);                \
       exit(1);                                                              \
     }                                                                       \
   } while (0)
@@ -251,9 +251,10 @@ static void test_float(JIT *jit) {
 }
 
 static void test_host_symbols(JIT *jit) {
-  CHECK(widcc_rt_add_func(jit->rt, "host_add", host_add) == 0);
-  CHECK(widcc_rt_add_func(jit->rt, "host_bump", host_bump) == 0);
-  CHECK(widcc_rt_add_var(jit->rt, "host_counter", (void *)&host_counter) == 0);
+  CHECK(widcc_rt_add_func(jit->rt, "host_add", host_add) == NULL);
+  CHECK(widcc_rt_add_func(jit->rt, "host_bump", host_bump) == NULL);
+  CHECK(widcc_rt_add_var(jit->rt, "host_counter", (void *)&host_counter) ==
+        NULL);
 
   CHECK_COMPILE(jit, "host.c",
     "int host_add(int a, int b);\n"
@@ -284,8 +285,8 @@ static void test_host_resolver(void) {
   const char *src =
     "int picked(int, int);\n"
     "int use_pick(int a, int b) { return picked(a, b); }\n";
-  CHECK(widcc_cc_compile(ca, "pick_a.c", src) == 0);
-  CHECK(widcc_cc_compile(cb, "pick_b.c", src) == 0);
+  CHECK(widcc_cc_compile(ca, "pick_a.c", src) == NULL);
+  CHECK(widcc_cc_compile(cb, "pick_b.c", src) == NULL);
 
   int (*ua)(int, int) = widcc_rt_lookup(ra, "use_pick");
   int (*ub)(int, int) = widcc_rt_lookup(rb, "use_pick");
@@ -311,8 +312,9 @@ static void test_recompile(JIT *jit) {
 }
 
 static void test_error_recovery(JIT *jit) {
-  CHECK(widcc_cc_compile(jit->cc, "bad.c", "int broken( { return ;") == -1);
-  CHECK(strlen(widcc_cc_error(jit->cc)) > 0);
+  const char *err =
+      widcc_cc_compile(jit->cc, "bad.c", "int broken( { return ;");
+  CHECK(err && strlen(err) > 0);
   CHECK_COMPILE(jit, "ok.c", "int still_ok(void) { return 7; }\n");
   int (*still_ok)(void) = widcc_rt_lookup(jit->rt, "still_ok");
   CHECK(still_ok && still_ok() == 7);
@@ -337,14 +339,15 @@ static void test_compile_file(JIT *jit) {
   fclose(f);
 
   // Quoted #include directives resolve relative to the compiled file.
-  CHECK(widcc_cc_compile_file(jit->cc, src) == 0);
+  CHECK(widcc_cc_compile_file(jit->cc, src) == NULL);
   int (*file_sum)(int, int) = widcc_rt_lookup(jit->rt, "file_sum");
   CHECK(file_sum && file_sum(2, 3) == 12);
 
   // An unreadable path is a normal compile error, not a process exit.
-  CHECK(widcc_cc_compile_file(jit->cc, "widcc_no_such_file_xyz.c") == -1);
-  CHECK(strlen(widcc_cc_error(jit->cc)) > 0);
-  CHECK(widcc_cc_compile_file(jit->cc, NULL) == -1);
+  const char *err =
+      widcc_cc_compile_file(jit->cc, "widcc_no_such_file_xyz.c");
+  CHECK(err && strlen(err) > 0);
+  CHECK(widcc_cc_compile_file(jit->cc, NULL) != NULL);
 
   remove(hdr);
   remove(src);
@@ -366,25 +369,25 @@ static void test_include_paths(JIT *jit) {
 
   // The string form treats its path as the file name: a quoted include
   // resolves relative to it even though the file does not exist on disk.
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", quote) == 0);
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", quote) == NULL);
   int (*inc_quote)(void) = widcc_rt_lookup(jit->rt, "inc_quote");
   CHECK(inc_quote && inc_quote() == 9);
 
   // Angle includes search only the configured list, which starts empty.
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == -1);
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) != NULL);
   const char *paths[] = {"."};
-  CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == 0);
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == 0);
+  CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == NULL);
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == NULL);
   int (*inc_angle)(void) = widcc_rt_lookup(jit->rt, "inc_angle");
   CHECK(inc_angle && inc_angle() == 9);
 
   // Invalid arguments are rejected; NULL/0 clears the list.
-  CHECK(widcc_rt_set_include_paths(NULL, paths, 1) == -1);
-  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 1) == -1);
+  CHECK(widcc_rt_set_include_paths(NULL, paths, 1) != NULL);
+  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 1) != NULL);
   const char *bad[] = {NULL};
-  CHECK(widcc_rt_set_include_paths(jit->rt, bad, 1) == -1);
-  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == 0);
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == -1);
+  CHECK(widcc_rt_set_include_paths(jit->rt, bad, 1) != NULL);
+  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == NULL);
+  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) != NULL);
 
   remove(hdr);
 }
@@ -439,21 +442,21 @@ static void test_file_ops(JIT *jit) {
   widcc_set_file_ops(&ops);
 
   const char *paths[] = {"/vfs"};
-  CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == 0);
+  CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == NULL);
 
   // Both the unit itself and its #include go through the hooks.
-  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") == 0);
+  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") == NULL);
   int (*answer)(void) = widcc_rt_lookup(jit->rt, "vfs_answer");
   CHECK(answer && answer() == 42);
 
   // "-" is an ordinary path now; it no longer means stdin.
-  CHECK(widcc_cc_compile_file(jit->cc, "-") == -1);
+  CHECK(widcc_cc_compile_file(jit->cc, "-") != NULL);
 
   widcc_set_file_ops(NULL);
-  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == 0);
+  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == NULL);
 
   // Host defaults are back: the virtual unit no longer exists.
-  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") == -1);
+  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") != NULL);
 }
 
 static void test_runtime_release(void) {
@@ -774,9 +777,9 @@ static void test_int64_semantics(JIT *jit) {
   CHECK(wide_divmod(10000000000LL, 7LL) == 10000000000LL / 7LL + 10000000000LL % 7LL);
 #else
   // i64 parameters/returns are still a compile-time error on a 32-bit host.
-  CHECK(widcc_cc_compile(jit->cc, "int64_param.c",
-    "long long wide_mul(long long a, long long b) { return a * b; }\n") == -1);
-  CHECK(strstr(widcc_cc_error(jit->cc), "64-bit") != NULL);
+  const char *err = widcc_cc_compile(jit->cc, "int64_param.c",
+    "long long wide_mul(long long a, long long b) { return a * b; }\n");
+  CHECK(err && strstr(err, "64-bit") != NULL);
 
   CHECK_COMPILE(jit, "int64_32.c",
     "long long g_add, g_sub, g_mul, g_div, g_mod;\n"

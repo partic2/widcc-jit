@@ -13,8 +13,9 @@
   } while (0)
 
 #define CK(cc, name, src) do { \
-  if (widcc_cc_compile(cc, name, src) != 0) { \
-    fprintf(stderr, "compile %s failed: %s\n", name, widcc_cc_error(cc)); \
+  const char *err = widcc_cc_compile(cc, name, src); \
+  if (err) { \
+    fprintf(stderr, "compile %s failed: %s\n", name, err); \
     exit(1); \
   } \
 } while (0)
@@ -26,8 +27,8 @@ int main(void) {
   WidccRT *rt = widcc_rt_new();
   WidccCompiler *cc = widcc_cc_new(rt);
   CHECK(rt && cc);
-  CHECK(widcc_rt_add_func(rt, "add3", (void *)add3) == 0);
-  CHECK(widcc_rt_add_func(rt, "dadd", (void *)dadd) == 0);
+  CHECK(widcc_rt_add_func(rt, "add3", (void *)add3) == NULL);
+  CHECK(widcc_rt_add_func(rt, "dadd", (void *)dadd) == NULL);
 
   // Deep integer nesting: forces many simultaneous live values -> spills.
   CK(cc, "deep.c",

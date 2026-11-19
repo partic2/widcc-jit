@@ -23,6 +23,10 @@
 //   (tokens, AST, types). widcc_cc_free() releases that memory without
 //   touching the runtime.
 //
+// Error reporting: operations that can fail return NULL on success and a
+// message string on failure. The constructors widcc_rt_new() and
+// widcc_cc_new() instead return NULL on failure.
+//
 // Thread-safety: a runtime and its compilers must not be used from
 // multiple threads concurrently.
 #ifndef WIDCC_JIT_H
@@ -70,9 +74,10 @@ void widcc_rt_free(WidccRT *rt);
 // The runtime stores the address and never frees it. Registration
 // overrides automatic host-process resolution. A later compiled
 // definition of the same name may replace the registered address.
-// Returns 0 on success, -1 on invalid arguments.
-int widcc_rt_add_func(WidccRT *rt, const char *name, void *fn);
-int widcc_rt_add_var(WidccRT *rt, const char *name, void *var);
+// Returns NULL on success, or a static error message on invalid
+// arguments.
+const char *widcc_rt_add_func(WidccRT *rt, const char *name, void *fn);
+const char *widcc_rt_add_var(WidccRT *rt, const char *name, void *var);
 
 // Address of a symbol (function entry point or variable block).
 // Returns NULL if the name is not in the runtime map (or unresolved).
@@ -87,10 +92,10 @@ int widcc_rt_list_symbols(WidccRT *rt, char **names, int bufsize);
 // compilations of this runtime. The paths are copied. A quoted
 // #include "..." first searches the including file's directory and then
 // this list; #include <...> searches only this list. Pass NULL with
-// count 0 to clear it. Returns 0 on success, -1 on invalid arguments or
-// allocation failure.
-int widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
-                               int count);
+// count 0 to clear it. Returns NULL on success, or a static error
+// message on invalid arguments or allocation failure.
+const char *widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
+                                       int count);
 
 // Replace how this runtime resolves names that are missing from its
 // symbol map. The default looks the name up in the host process (dlsym
@@ -130,18 +135,17 @@ void widcc_cc_free(WidccCompiler *cc);
 // compiler's runtime are visible to the unit; unresolved externs are
 // then looked up in the host process (dlsym on Unix, exported symbols on
 // Windows). Definitions produced by the unit are added to the runtime.
-// Returns 0 on success, -1 on error (see widcc_cc_error()).
-int widcc_cc_compile(WidccCompiler *cc, const char *path, const char *source);
+// Returns NULL on success, or the error message on failure. The message
+// stays valid until the next compilation or widcc_cc_free().
+const char *widcc_cc_compile(WidccCompiler *cc, const char *path,
+                             const char *source);
 
 // Compile a translation unit read from `path` through the file hooks
 // (the host filesystem by default). The path is used in diagnostics and
-// as the base directory for quoted #include directives. Returns 0 on
-// success, -1 on error (unreadable file, syntax error, ...; see
-// widcc_cc_error()).
-int widcc_cc_compile_file(WidccCompiler *cc, const char *path);
-
-// The last error message of this compiler.
-const char *widcc_cc_error(WidccCompiler *cc);
+// as the base directory for quoted #include directives. Returns NULL on
+// success, or the error message on failure (unreadable file, syntax
+// error, ...; same lifetime as widcc_cc_compile()).
+const char *widcc_cc_compile_file(WidccCompiler *cc, const char *path);
 
 #ifdef __cplusplus
 }

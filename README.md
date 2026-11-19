@@ -40,8 +40,9 @@ WidccRT *rt = widcc_rt_new();
 widcc_rt_add_func(rt, "host_fn", (void *)host_fn);   // optional host symbols
 
 WidccCompiler *cc = widcc_cc_new(rt);
-if (widcc_cc_compile(cc, "prog.c", source) != 0) {
-  fprintf(stderr, "%s\n", widcc_cc_error(cc));
+const char *err = widcc_cc_compile(cc, "prog.c", source);
+if (err) {
+  fprintf(stderr, "%s\n", err);
 } else {
   int (*f)(int) = widcc_rt_lookup(rt, "f");
   f(42);
@@ -67,6 +68,10 @@ before compiling.
 
 Properties:
 
+- Fallible calls return NULL on success and an error message on failure;
+  constructors return NULL on failure. Error strings are owned by the
+  library (compiler messages stay valid until the next compile or
+  `widcc_cc_free()`).
 - Instances are independent; one process may hold any number of
   runtime/compiler pairs.
 - One runtime may be shared by several compilers, and one compiler may

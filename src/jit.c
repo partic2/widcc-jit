@@ -203,26 +203,26 @@ void widcc_rt_free(WidccRT *rt) {
   free(rt);
 }
 
-int widcc_rt_add_func(WidccRT *rt, const char *name, void *fn) {
+const char *widcc_rt_add_func(WidccRT *rt, const char *name, void *fn) {
   if (!rt || !name || !fn)
-    return -1;
+    return "widcc_rt_add_func: invalid argument";
   JitSym *s = jit_sym(rt, name, true);
   s->addr = fn;
   s->is_tentative = false;
   if (s->cell)
     *s->cell = fn;
-  return 0;
+  return NULL;
 }
 
-int widcc_rt_add_var(WidccRT *rt, const char *name, void *var) {
+const char *widcc_rt_add_var(WidccRT *rt, const char *name, void *var) {
   if (!rt || !name || !var)
-    return -1;
+    return "widcc_rt_add_var: invalid argument";
   JitSym *s = jit_sym(rt, name, false);
   s->addr = var;
   s->is_tentative = false;
   if (s->cell)
     *s->cell = var;
-  return 0;
+  return NULL;
 }
 
 void *widcc_rt_lookup(WidccRT *rt, const char *name) {
@@ -232,26 +232,26 @@ void *widcc_rt_lookup(WidccRT *rt, const char *name) {
   return s ? s->addr : NULL;
 }
 
-int widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
-                               int count) {
+const char *widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
+                                       int count) {
   if (!rt || count < 0 || (count > 0 && !paths))
-    return -1;
+    return "widcc_rt_set_include_paths: invalid argument";
 
   char **copy = NULL;
   if (count > 0) {
     copy = calloc((size_t)count, sizeof(char *));
     if (!copy)
-      return -1;
+      return "widcc_rt_set_include_paths: out of memory";
     for (int i = 0; i < count; i++) {
       if (!paths[i]) {
         free_path_array(copy, i);
-        return -1;
+        return "widcc_rt_set_include_paths: invalid argument";
       }
       size_t n = strlen(paths[i]) + 1;
       copy[i] = malloc(n);
       if (!copy[i]) {
         free_path_array(copy, i);
-        return -1;
+        return "widcc_rt_set_include_paths: out of memory";
       }
       memcpy(copy[i], paths[i], n);
     }
@@ -260,7 +260,7 @@ int widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
   free_path_array(rt->inc_paths, rt->inc_count);
   rt->inc_paths = copy;
   rt->inc_count = count;
-  return 0;
+  return NULL;
 }
 
 int widcc_rt_list_symbols(WidccRT *rt, char **names, int bufsize) {
@@ -345,8 +345,8 @@ void widcc_cc_free(WidccCompiler *cc) {
 // Compile one translation unit into the runtime. When `source` is
 // non-NULL it is the file's contents and `path` is only its name;
 // otherwise the unit is read from `path` on disk.
-static int jit_compile_core(WidccCompiler *cc, const char *path,
-                            const char *source) {
+static const char *jit_compile_core(WidccCompiler *cc, const char *path,
+                                    const char *source) {
   CCCtx *ctx = &cc->cc;
   cc_ctx = ctx;
   ccctx_reset_frontend(ctx);
@@ -359,7 +359,7 @@ static int jit_compile_core(WidccCompiler *cc, const char *path,
     }
     ctx->err_active = false;
     cc_ctx = NULL;
-    return -1;
+    return ctx->err_msg;
   }
 
   init_ty();
@@ -387,26 +387,20 @@ static int jit_compile_core(WidccCompiler *cc, const char *path,
 
   ctx->err_active = false;
   cc_ctx = NULL;
-  return 0;
+  return NULL;
 }
 
-int widcc_cc_compile(WidccCompiler *cc, const char *path,
-                     const char *source) {
+const char *widcc_cc_compile(WidccCompiler *cc, const char *path,
+                             const char *source) {
   if (!cc || !path || !source)
-    return -1;
+    return "widcc_cc_compile: invalid argument";
   return jit_compile_core(cc, path, source);
 }
 
-int widcc_cc_compile_file(WidccCompiler *cc, const char *path) {
+const char *widcc_cc_compile_file(WidccCompiler *cc, const char *path) {
   if (!cc || !path)
-    return -1;
+    return "widcc_cc_compile_file: invalid argument";
   return jit_compile_core(cc, path, NULL);
-}
-
-const char *widcc_cc_error(WidccCompiler *cc) {
-  if (!cc)
-    return "widcc-jit: no compiler";
-  return cc->cc.err_msg;
 }
 
 #endif // WIDCC_JIT_C

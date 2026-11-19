@@ -39,7 +39,7 @@ int main(void) {
     CHECK(widcc_cc_compile(cc, "t.c",
       "int g;\n"
       "int f(int x){ g+=x; return g*g; }\n"
-      "double d(double a,double b){ return a*b+1.0; }\n") == 0);
+      "double d(double a,double b){ return a*b+1.0; }\n") == NULL);
     int (*f)(int) = widcc_rt_lookup(rt, "f");
     double (*d)(double, double) = widcc_rt_lookup(rt, "d");
     CHECK(f && d);
@@ -55,13 +55,13 @@ int main(void) {
   rt = widcc_rt_new();
   cc = widcc_cc_new(rt);
   CHECK(rt && cc);
-  CHECK(widcc_cc_compile(cc, "a.c", "int one(void){ return 1; }\n") == 0);
+  CHECK(widcc_cc_compile(cc, "a.c", "int one(void){ return 1; }\n") == NULL);
   int (*one)(void) = widcc_rt_lookup(rt, "one");
   CHECK(one() == 1);
   widcc_rt_free_funcs(rt);
   CHECK(widcc_rt_lookup(rt, "one") == NULL);
   widcc_rt_free_vars(rt);
-  CHECK(widcc_cc_compile(cc, "b.c", "int two(void){ return 2; }\n") == 0);
+  CHECK(widcc_cc_compile(cc, "b.c", "int two(void){ return 2; }\n") == NULL);
   int (*two)(void) = widcc_rt_lookup(rt, "two");
   CHECK(two() == 2);
   widcc_cc_free(cc);
@@ -73,7 +73,7 @@ int main(void) {
   rt = widcc_rt_new();
   cc = widcc_cc_new(rt);
   CHECK(rt && cc);
-  CHECK(widcc_rt_add_func(rt, "host_add", (void *)host_add) == 0);
+  CHECK(widcc_rt_add_func(rt, "host_add", (void *)host_add) == NULL);
   CHECK(widcc_cc_compile(cc, "u1.c",
     "int host_add(int,int);\n"
     "int callee(int);\n"
@@ -96,11 +96,11 @@ int main(void) {
   cc = widcc_cc_new(rt);
   CHECK(rt && cc);
   for (int i = 0; i < 5; i++) {
-    CHECK(widcc_cc_compile(cc, "bad.c", "int broken( {") == -1);
-    CHECK(strlen(widcc_cc_error(cc)) > 0);
+    const char *err = widcc_cc_compile(cc, "bad.c", "int broken( {");
+    CHECK(err && strlen(err) > 0);
   }
   CHECK(widcc_cc_compile(cc, "good.c",
-    "int ok(void){ return 42; }\n") == 0);
+    "int ok(void){ return 42; }\n") == NULL);
   int (*ok)(void) = widcc_rt_lookup(rt, "ok");
   CHECK(ok && ok() == 42);
   widcc_cc_free(cc);
@@ -112,8 +112,8 @@ int main(void) {
   WidccCompiler *ca = widcc_cc_new(ra);
   WidccCompiler *cb = widcc_cc_new(rb);
   CHECK(ra && rb && ca && cb);
-  CHECK(widcc_cc_compile(ca, "a.c", "int fa(void){ return 1; }\n") == 0);
-  CHECK(widcc_cc_compile(cb, "b.c", "int fb(void){ return 2; }\n") == 0);
+  CHECK(widcc_cc_compile(ca, "a.c", "int fa(void){ return 1; }\n") == NULL);
+  CHECK(widcc_cc_compile(cb, "b.c", "int fb(void){ return 2; }\n") == NULL);
   CHECK(((int (*)(void))widcc_rt_lookup(ra, "fa"))() == 1);
   CHECK(((int (*)(void))widcc_rt_lookup(rb, "fb"))() == 2);
   CHECK(widcc_rt_lookup(ra, "fb") == NULL);
