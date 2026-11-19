@@ -1,34 +1,32 @@
-// widcc JIT public API: a Runtime half and a Compiler half.
+// widcc JIT public API: a runtime that owns symbols and loaded modules.
 //
 // Runtime (widcc_rt_*)
-//   A runtime owns a symbol map from name to symbol information. Symbols
-//   are either global functions or global variables. Entries are added by
-//   the host (widcc_rt_add_func / widcc_rt_add_var) or registered
-//   automatically when a compiler produces definitions. The runtime owns
-//   everything produced by compilation that generated code references —
-//   machine code pages and global data blocks — and each symbol class has
-//   its own release function:
+//   A runtime owns a symbol map from name to symbol information (global
+//   functions and global variables) and the set of loaded code modules.
+//   Symbols are added by the host (widcc_rt_add_func / widcc_rt_add_var)
+//   or registered automatically when a module defines them. External
+//   symbols are resolved through the runtime, then through the host
+//   process.
 //
-//     widcc_rt_free_funcs()  releases generated code and function entries
-//     widcc_rt_free_vars()   releases generated data and variable entries
+// Load API (widcc_rt_load_* / widcc_rt_unload_code)
+//   A load compiles one translation unit into a module handle that owns
+//   the generated machine code, global data blocks and static call cells
+//   produced by that unit. Release a module with widcc_rt_unload_code(),
+//   or release all remaining modules with widcc_rt_free().
 //
-//   A runtime is independent of any compiler: symbols registered in it
-//   remain valid after the compiler that produced them is destroyed.
-//
-// Compiler (widcc_cc_*)
-//   A compiler compiles C source into the runtime it was created with.
-//   Extern symbols are resolved through that runtime (then through the
-//   host process); definitions it produces are added to the runtime's
-//   symbol map. The compiler owns only its own compile-time memory
-//   (tokens, AST, types). widcc_cc_free() releases that memory without
-//   touching the runtime.
+//   Loading follows the dynamic-loader model: a definition in a newly
+//   loaded module overrides earlier definitions of the same name, and
+//   unloading never restores them. A symbol keeps its last definition
+//   even after the module that produced it is unloaded; calling through
+//   such a symbol is undefined, as with dlclose().
 //
 // Error reporting: operations that can fail return NULL on success and a
-// message string on failure. The constructors widcc_rt_new() and
-// widcc_cc_new() instead return NULL on failure.
+// message string on failure. The constructor widcc_rt_new() returns NULL
+// on failure. Messages from load calls stay valid until the next call on
+// that runtime; all other messages are static.
 //
-// Thread-safety: a runtime and its compilers must not be used from
-// multiple threads concurrently.
+// Thread-safety: a runtime and its modules must not be used from multiple
+// threads concurrently.
 #ifndef WIDCC_JIT_H
 #define WIDCC_JIT_H
 
@@ -39,7 +37,7 @@ extern "C" {
 #endif
 
 typedef struct WidccRT WidccRT;
-typedef struct WidccCompiler WidccCompiler;
+typedef struct WidccCode WidccCode;
 
 // ========== File I/O hooks ==========
 
@@ -50,7 +48,7 @@ typedef struct WidccCompiler WidccCompiler;
 // or NULL if the path cannot be opened; `read` fills `buf` with up to
 // `size` bytes and returns the byte count, 0 at end of file; `exists`
 // returns nonzero if the path exists. The hooks are used for #include
-// resolution and by widcc_cc_compile_file().
+// resolution and by widcc_rt_load_code_file().
 typedef struct WidccFileOps {
   void *(*open)(const char *path);
   size_t (*read)(void *file, void *buf, size_t size);
@@ -65,14 +63,15 @@ void widcc_set_file_ops(const WidccFileOps *ops);
 
 // ========== Runtime API ==========
 
-// Create / destroy a runtime. Both are NULL-safe on free.
+// Create / destroy a runtime. widcc_rt_free() is NULL-safe and releases
+// every module still loaded as well as all symbols.
 // Returns NULL on allocation failure.
 WidccRT *widcc_rt_new(void);
 void widcc_rt_free(WidccRT *rt);
 
 // Register a host-provided global function or variable under `name`.
 // The runtime stores the address and never frees it. Registration
-// overrides automatic host-process resolution. A later compiled
+// overrides automatic host-process resolution. A later loaded
 // definition of the same name may replace the registered address.
 // Returns NULL on success, or a static error message on invalid
 // arguments.
@@ -89,7 +88,7 @@ void *widcc_rt_lookup(WidccRT *rt, const char *name);
 int widcc_rt_list_symbols(WidccRT *rt, char **names, int bufsize);
 
 // Set the default directory search list for #include used by later
-// compilations of this runtime. The paths are copied. A quoted
+// loads of this runtime. The paths are copied. A quoted
 // #include "..." first searches the including file's directory and then
 // this list; #include <...> searches only this list. Pass NULL with
 // count 0 to clear it. Returns NULL on success, or a static error
@@ -101,51 +100,40 @@ const char *widcc_rt_set_include_paths(WidccRT *rt, const char *const *paths,
 // symbol map. The default looks the name up in the host process (dlsym
 // on Unix, exported modules on Windows); callers can chain to it with
 // widcc_rt_default_host_resolver(). Pass NULL to restore the default.
-// The resolver applies to later compilations of this runtime.
+// The resolver applies to later loads of this runtime.
 void widcc_rt_set_host_resolver(WidccRT *rt,
                                 void *(*resolve)(WidccRT *, const char *));
 
 // The default resolver: runtime symbols first, then the host process.
 void *widcc_rt_default_host_resolver(WidccRT *rt, const char *name);
 
-// Release generated function code and drop all function entries
-// (including host-registered ones). Previously obtained function
-// pointers become invalid. Variables stay accessible.
-void widcc_rt_free_funcs(WidccRT *rt);
+// ========== Load API ==========
 
-// Release generated global data blocks and drop all variable entries
-// (including host-registered ones). Must be called after
-// widcc_rt_free_funcs() — generated code references these blocks.
-void widcc_rt_free_vars(WidccRT *rt);
-
-// ========== Compiler API ==========
-
-// Create a compiler bound to `rt`. Returns NULL if `rt` is NULL or on
-// allocation failure.
-WidccCompiler *widcc_cc_new(WidccRT *rt);
-
-// Destroy a compiler and its compile-time memory. Symbols previously
-// produced by it in the runtime are unaffected.
-void widcc_cc_free(WidccCompiler *cc);
-
-// Compile a translation unit from a NUL-terminated C source string.
-// `path` names the unit: it is used in diagnostics and as the base
-// directory for quoted #include directives, but the file is not read
-// (the string is the file's contents). Symbols registered in the
-// compiler's runtime are visible to the unit; unresolved externs are
-// then looked up in the host process (dlsym on Unix, exported symbols on
-// Windows). Definitions produced by the unit are added to the runtime.
-// Returns NULL on success, or the error message on failure. The message
-// stays valid until the next compilation or widcc_cc_free().
-const char *widcc_cc_compile(WidccCompiler *cc, const char *path,
-                             const char *source);
+// Compile one translation unit from a NUL-terminated C source string and
+// load it as a module. `path` names the unit: it is used in diagnostics
+// and as the base directory for quoted #include directives, but the file
+// is not read (the string is the file's contents).
+//
+// On success returns NULL and, when `out` is non-NULL, stores the module
+// handle there. Pass out=NULL to load without keeping a handle; the
+// module is then released by widcc_rt_free(). On failure returns the
+// error message and releases everything the unit allocated; the message
+// stays valid until the next call on `rt`.
+const char *widcc_rt_load_code(WidccRT *rt, const char *path,
+                               const char *source, WidccCode **out);
 
 // Compile a translation unit read from `path` through the file hooks
-// (the host filesystem by default). The path is used in diagnostics and
-// as the base directory for quoted #include directives. Returns NULL on
-// success, or the error message on failure (unreadable file, syntax
-// error, ...; same lifetime as widcc_cc_compile()).
-const char *widcc_cc_compile_file(WidccCompiler *cc, const char *path);
+// (the host filesystem by default). Same result and handle semantics as
+// widcc_rt_load_code().
+const char *widcc_rt_load_code_file(WidccRT *rt, const char *path,
+                                    WidccCode **out);
+
+// Release a module: generated code, global data blocks and static call
+// cells produced by that load. Symbol entries are neither removed nor
+// restored; the map keeps the last definition even though its code is
+// gone. Passing NULL is a no-op. Returns NULL on success, or a static
+// error message if `code` is not a module of this runtime.
+const char *widcc_rt_unload_code(WidccRT *rt, WidccCode *code);
 
 #ifdef __cplusplus
 }

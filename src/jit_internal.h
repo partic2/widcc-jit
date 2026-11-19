@@ -10,10 +10,9 @@
 struct Obj;
 typedef struct Obj Obj;
 
-// Runtime-owned heap blocks. `func_aux` holds scratch referenced by
-// generated functions (per-TU static call cells); `data` holds global
-// data blocks. They are released by widcc_rt_free_funcs /
-// widcc_rt_free_vars respectively.
+// Runtime-owned heap blocks. A loaded module tracks the scratch used by
+// its functions (static call cells) and its global data blocks; both
+// lists are released by widcc_rt_unload_code.
 typedef struct JitMallocBlock JitMallocBlock;
 struct JitMallocBlock {
   JitMallocBlock *next;
@@ -21,7 +20,7 @@ struct JitMallocBlock {
 };
 
 // Runtime-owned symbol entry. Everything in here is malloc'd by the
-// runtime, so entries outlive the compiler that created them.
+// runtime, so entries outlive the module that defined them.
 typedef struct JitSym JitSym;
 struct JitSym {
   JitSym *next;         // all runtime symbols, newest first
@@ -38,12 +37,20 @@ struct JitCode {
   void *code;           // sljit_generate_code result, freed via sljit_free_code
 };
 
+// One loaded translation unit. Owns every allocation made while
+// compiling it.
+struct WidccCode {
+  WidccCode *next;              // loaded modules of the runtime, newest first
+  JitCode *codes;               // generated machine code blocks
+  JitMallocBlock *func_aux;     // static call cells used by this module
+  JitMallocBlock *data;         // generated global data blocks
+};
+
 struct WidccRT {
   HashMap syms;                 // char *name -> JitSym * (heap-mode map)
   JitSym *symlist;              // all symbols, newest first
-  JitCode *codes;               // generated machine code blocks
-  JitMallocBlock *func_aux;     // runtime-owned scratch used by functions
-  JitMallocBlock *data;         // generated global data blocks
+  WidccCode *modules;           // loaded modules, newest first
+  char err_msg[2048];           // last load error (see widcc_rt_load_code)
   // Default #include search list; runtime-owned copies.
   char **inc_paths;
   int inc_count;
@@ -52,9 +59,13 @@ struct WidccRT {
   void *(*host_resolve)(WidccRT *rt, const char *name);
 };
 
+// Compiler state for one load. Never exposed publicly; created and
+// destroyed by widcc_rt_load_code.
+typedef struct WidccCompiler WidccCompiler;
 struct WidccCompiler {
   CCCtx cc;                     // frontend context + compile-time arena
   WidccRT *rt;                  // borrowed; not owned by the compiler
+  WidccCode *mod;               // module receiving code/data allocations
   struct sljit_compiler *active_compiler; // for error-path cleanup
 };
 
@@ -62,23 +73,21 @@ struct WidccCompiler {
 // symbol declared here has internal linkage.
 
 // Plain runtime-heap allocations (symbol entries, names, cells, code
-// nodes). OOM reports through error(): longjmp while a compile armed the
-// handler, process exit otherwise.
+// nodes, modules). OOM reports through error(): longjmp while a compile
+// armed the handler, process exit otherwise.
 static void *rt_alloc(size_t sz);
 static char *rt_strdup(const char *s);
 
-// Tracked runtime-heap allocations, zero-filled on allocation.
-// rt_alloc_func blocks are freed by widcc_rt_free_funcs; rt_alloc_data
-// blocks by widcc_rt_free_vars.
-static void *rt_alloc_func(WidccRT *rt, size_t sz);
-static void *rt_alloc_data(WidccRT *rt, size_t sz);
+// Tracked runtime-heap allocations, zero-filled on allocation and owned
+// by the compiler's current module. Released when the module is unloaded.
+static void *rt_alloc_func(WidccCompiler *cc, size_t sz);
+static void *rt_alloc_data(WidccCompiler *cc, size_t sz);
 static void rt_free_blocks(JitMallocBlock **list);
 
 // Lazily materialize the runtime-owned indirection cell for a symbol.
 static void **rt_cell_alloc(void);
 
-// Look up (or create) a runtime symbol entry. `is_func` classifies the
-// symbol for the per-kind release functions; an existing entry keeps its
+// Look up (or create) a runtime symbol entry. An existing entry keeps its
 // function flag once set.
 static JitSym *jit_sym(WidccRT *rt, const char *name, bool is_func);
 static void **jit_sym_cell(JitSym *s);
@@ -88,7 +97,7 @@ static void *jit_resolve_host(WidccRT *rt, const char *name);
 // Address of the trap executed when JIT code calls an unresolved function.
 static void *jit_undefined_fn_addr(void);
 
-// Generate machine code for a whole parsed translation unit.
+// Generate machine code for a whole parsed translation unit into cc->mod.
 static void jitgen_tu(WidccCompiler *cc, Obj *prog);
 
 #endif

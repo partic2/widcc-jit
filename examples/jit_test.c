@@ -3,15 +3,14 @@
 // Covers: arithmetic, control flow, functions/recursion, forward references
 // across translation units, structs, arrays, pointers, strings, global
 // variables, host symbol registration (including per-runtime resolvers),
-// repeated compilation, and per-kind runtime release.
+// repeated loads, per-module unload, includes and virtual file I/O.
 #include "widcc_jit.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// A compiler paired with the runtime it compiles into.
+// The runtime under test; modules are loaded into it.
 typedef struct {
-  WidccCompiler *cc;
   WidccRT *rt;
 } JIT;
 
@@ -28,9 +27,9 @@ typedef struct {
 
 #define CHECK_COMPILE(jit, name, src)                                       \
   do {                                                                      \
-    const char *err = widcc_cc_compile((jit)->cc, name, src);               \
+    const char *err = widcc_rt_load_code((jit)->rt, name, src, NULL);       \
     if (err) {                                                              \
-      fprintf(stderr, "compile %s failed: %s\n", name, err);                \
+      fprintf(stderr, "load %s failed: %s\n", name, err);                   \
       exit(1);                                                              \
     }                                                                       \
   } while (0)
@@ -276,17 +275,15 @@ static void test_host_resolver(void) {
   // different host functions without affecting each other.
   WidccRT *ra = widcc_rt_new();
   WidccRT *rb = widcc_rt_new();
-  WidccCompiler *ca = widcc_cc_new(ra);
-  WidccCompiler *cb = widcc_cc_new(rb);
-  CHECK(ra && rb && ca && cb);
+  CHECK(ra && rb);
   widcc_rt_set_host_resolver(ra, resolve_add);
   widcc_rt_set_host_resolver(rb, resolve_sub);
 
   const char *src =
     "int picked(int, int);\n"
     "int use_pick(int a, int b) { return picked(a, b); }\n";
-  CHECK(widcc_cc_compile(ca, "pick_a.c", src) == NULL);
-  CHECK(widcc_cc_compile(cb, "pick_b.c", src) == NULL);
+  CHECK(widcc_rt_load_code(ra, "pick_a.c", src, NULL) == NULL);
+  CHECK(widcc_rt_load_code(rb, "pick_b.c", src, NULL) == NULL);
 
   int (*ua)(int, int) = widcc_rt_lookup(ra, "use_pick");
   int (*ub)(int, int) = widcc_rt_lookup(rb, "use_pick");
@@ -294,9 +291,7 @@ static void test_host_resolver(void) {
   CHECK(ua(10, 3) == 13);
   CHECK(ub(10, 3) == 7);
 
-  widcc_cc_free(cb);
   widcc_rt_free(rb);
-  widcc_cc_free(ca);
   widcc_rt_free(ra);
 }
 
@@ -313,7 +308,7 @@ static void test_recompile(JIT *jit) {
 
 static void test_error_recovery(JIT *jit) {
   const char *err =
-      widcc_cc_compile(jit->cc, "bad.c", "int broken( { return ;");
+      widcc_rt_load_code(jit->rt, "bad.c", "int broken( { return ;", NULL);
   CHECK(err && strlen(err) > 0);
   CHECK_COMPILE(jit, "ok.c", "int still_ok(void) { return 7; }\n");
   int (*still_ok)(void) = widcc_rt_lookup(jit->rt, "still_ok");
@@ -339,15 +334,15 @@ static void test_compile_file(JIT *jit) {
   fclose(f);
 
   // Quoted #include directives resolve relative to the compiled file.
-  CHECK(widcc_cc_compile_file(jit->cc, src) == NULL);
+  CHECK(widcc_rt_load_code_file(jit->rt, src, NULL) == NULL);
   int (*file_sum)(int, int) = widcc_rt_lookup(jit->rt, "file_sum");
   CHECK(file_sum && file_sum(2, 3) == 12);
 
   // An unreadable path is a normal compile error, not a process exit.
   const char *err =
-      widcc_cc_compile_file(jit->cc, "widcc_no_such_file_xyz.c");
+      widcc_rt_load_code_file(jit->rt, "widcc_no_such_file_xyz.c", NULL);
   CHECK(err && strlen(err) > 0);
-  CHECK(widcc_cc_compile_file(jit->cc, NULL) != NULL);
+  CHECK(widcc_rt_load_code_file(jit->rt, NULL, NULL) != NULL);
 
   remove(hdr);
   remove(src);
@@ -369,15 +364,15 @@ static void test_include_paths(JIT *jit) {
 
   // The string form treats its path as the file name: a quoted include
   // resolves relative to it even though the file does not exist on disk.
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", quote) == NULL);
+  CHECK(widcc_rt_load_code(jit->rt, "widcc_inc_main.c", quote, NULL) == NULL);
   int (*inc_quote)(void) = widcc_rt_lookup(jit->rt, "inc_quote");
   CHECK(inc_quote && inc_quote() == 9);
 
   // Angle includes search only the configured list, which starts empty.
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) != NULL);
+  CHECK(widcc_rt_load_code(jit->rt, "widcc_inc_main.c", angle, NULL) != NULL);
   const char *paths[] = {"."};
   CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == NULL);
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) == NULL);
+  CHECK(widcc_rt_load_code(jit->rt, "widcc_inc_main.c", angle, NULL) == NULL);
   int (*inc_angle)(void) = widcc_rt_lookup(jit->rt, "inc_angle");
   CHECK(inc_angle && inc_angle() == 9);
 
@@ -387,7 +382,7 @@ static void test_include_paths(JIT *jit) {
   const char *bad[] = {NULL};
   CHECK(widcc_rt_set_include_paths(jit->rt, bad, 1) != NULL);
   CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == NULL);
-  CHECK(widcc_cc_compile(jit->cc, "widcc_inc_main.c", angle) != NULL);
+  CHECK(widcc_rt_load_code(jit->rt, "widcc_inc_main.c", angle, NULL) != NULL);
 
   remove(hdr);
 }
@@ -445,66 +440,61 @@ static void test_file_ops(JIT *jit) {
   CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == NULL);
 
   // Both the unit itself and its #include go through the hooks.
-  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") == NULL);
+  CHECK(widcc_rt_load_code_file(jit->rt, "/vfs/main.c", NULL) == NULL);
   int (*answer)(void) = widcc_rt_lookup(jit->rt, "vfs_answer");
   CHECK(answer && answer() == 42);
 
   // "-" is an ordinary path now; it no longer means stdin.
-  CHECK(widcc_cc_compile_file(jit->cc, "-") != NULL);
+  CHECK(widcc_rt_load_code_file(jit->rt, "-", NULL) != NULL);
 
   widcc_set_file_ops(NULL);
   CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == NULL);
 
   // Host defaults are back: the virtual unit no longer exists.
-  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") != NULL);
+  CHECK(widcc_rt_load_code_file(jit->rt, "/vfs/main.c", NULL) != NULL);
 }
 
 static void test_runtime_release(void) {
   WidccRT *rt = widcc_rt_new();
-  WidccCompiler *cc = widcc_cc_new(rt);
-  CHECK(rt && cc);
-  JIT jit = {cc, rt};
+  CHECK(rt != NULL);
 
-  // Compile something — generated code and generated data are both owned
-  // by the runtime, not by the compiler.
-  CHECK_COMPILE(&jit, "tiers.c",
+  // A module owns the code and data produced by its unit.
+  WidccCode *mod = NULL;
+  const char *err = widcc_rt_load_code(rt, "tiers.c",
     "int counter = 5;\n"
-    "int add1(int x) { return x + 1; }\n");
+    "int add1(int x) { return x + 1; }\n", &mod);
+  CHECK(err == NULL && mod != NULL);
   CHECK(widcc_rt_list_symbols(rt, NULL, 0) >= 2);
 
   int (*add1)(int) = widcc_rt_lookup(rt, "add1");
   CHECK(add1 && add1(9) == 10);
-
-  // Release the compiler first: runtime symbols must stay callable.
-  widcc_cc_free(cc);
-  cc = NULL;
-  CHECK(add1(41) == 42);
-
-  // Functions only: code and function entries are gone, generated data
-  // (and its variable entry) stays.
-  widcc_rt_free_funcs(rt);
-  CHECK(widcc_rt_lookup(rt, "add1") == NULL);
   int *c = widcc_rt_lookup(rt, "counter");
   CHECK(c && *c == 5);
 
-  // Variables only: generated data and variable entries are gone.
-  widcc_rt_free_vars(rt);
-  CHECK(widcc_rt_lookup(rt, "counter") == NULL);
-  CHECK(widcc_rt_lookup(rt, "add1") == NULL);
+  // Unloading releases them. Symbols are neither removed nor restored.
+  CHECK(widcc_rt_unload_code(rt, mod) == NULL);
+  CHECK(widcc_rt_unload_code(rt, NULL) == NULL);
+  CHECK(widcc_rt_unload_code(rt, mod) != NULL); // module is gone
+  CHECK(widcc_rt_lookup(rt, "add1") != NULL);   // stale; never call it
 
-  // The runtime is reusable after both releases.
-  cc = widcc_cc_new(rt);
-  CHECK(cc);
-  jit.cc = cc;
-  CHECK_COMPILE(&jit, "tiers2.c",
+  // A module of another runtime is not ours to unload.
+  WidccRT *other = widcc_rt_new();
+  WidccCode *foreign = NULL;
+  CHECK(widcc_rt_load_code(other, "foreign.c",
+    "int foreign_fn(void) { return 3; }\n", &foreign) == NULL);
+  CHECK(widcc_rt_unload_code(rt, foreign) != NULL);
+  CHECK(widcc_rt_unload_code(other, foreign) == NULL);
+  widcc_rt_free(other);
+
+  // The runtime stays usable for new loads.
+  CHECK(widcc_rt_load_code(rt, "tiers2.c",
     "int counter2 = 42;\n"
-    "int times2(int x) { return x * 2; }\n");
+    "int times2(int x) { return x * 2; }\n", NULL) == NULL);
   int (*times2)(int) = widcc_rt_lookup(rt, "times2");
   int *c2 = widcc_rt_lookup(rt, "counter2");
   CHECK(times2 && times2(21) == 42);
   CHECK(c2 && *c2 == 42);
 
-  widcc_cc_free(cc);
   widcc_rt_free(rt);
 }
 
@@ -777,8 +767,8 @@ static void test_int64_semantics(JIT *jit) {
   CHECK(wide_divmod(10000000000LL, 7LL) == 10000000000LL / 7LL + 10000000000LL % 7LL);
 #else
   // i64 parameters/returns are still a compile-time error on a 32-bit host.
-  const char *err = widcc_cc_compile(jit->cc, "int64_param.c",
-    "long long wide_mul(long long a, long long b) { return a * b; }\n");
+  const char *err = widcc_rt_load_code(jit->rt, "int64_param.c",
+    "long long wide_mul(long long a, long long b) { return a * b; }\n", NULL);
   CHECK(err && strstr(err, "64-bit") != NULL);
 
   CHECK_COMPILE(jit, "int64_32.c",
@@ -954,9 +944,8 @@ static void test_data_model(JIT *jit) {
 
 int main(void) {
   WidccRT *rt = widcc_rt_new();
-  WidccCompiler *cc = widcc_cc_new(rt);
-  CHECK(rt && cc);
-  JIT jit = {cc, rt};
+  CHECK(rt != NULL);
+  JIT jit = {rt};
 
   test_arith_control(&jit);
   test_func_recursion(&jit);
@@ -980,11 +969,10 @@ int main(void) {
 
   test_runtime_release();
 
-  // A second, fully independent runtime/compiler pair.
+  // A second, fully independent runtime.
   WidccRT *rt2 = widcc_rt_new();
-  WidccCompiler *cc2 = widcc_cc_new(rt2);
-  CHECK(rt2 && cc2);
-  JIT jit2 = {cc2, rt2};
+  CHECK(rt2 != NULL);
+  JIT jit2 = {rt2};
   CHECK_COMPILE(&jit2, "other.c",
     "int version(void) { return 42; }\n"
     "int triple(int x) { return x * 3; }\n");
@@ -996,9 +984,7 @@ int main(void) {
   int (*v)(void) = widcc_rt_lookup(rt, "version");
   CHECK(v && v() == 2);
 
-  widcc_cc_free(cc2);
   widcc_rt_free(rt2);
-  widcc_cc_free(cc);
   widcc_rt_free(rt);
 
   printf("jit_test: all tests passed\n");

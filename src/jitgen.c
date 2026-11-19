@@ -623,10 +623,10 @@ static void func_addr(JGen *g, Obj *var) {
       return;
     }
   }
-  WidccRT *rt = g->tu->rt;
-  JStaticCell *sc = rt_alloc_func(rt, sizeof(JStaticCell));
+  WidccCompiler *cc = g->tu->cc;
+  JStaticCell *sc = rt_alloc_func(cc, sizeof(JStaticCell));
   sc->fn = var;
-  sc->cell = rt_alloc_func(rt, sizeof(void *));
+  sc->cell = rt_alloc_func(cc, sizeof(void *));
   *sc->cell = jit_undefined_fn_addr();
   sc->next = g->tu->static_cells;
   g->tu->static_cells = sc;
@@ -2760,8 +2760,8 @@ static void compile_function(JTU *tu, Obj *fn) {
 
   void *code = sljit_generate_code(g.C, 0, NULL);
   if (!code) {
-    // On error the compiler is released by the setjmp error path in
-    // widcc_cc_compile via cc->active_compiler.
+    // On error the compiler is released by the load error path through
+    // cc->active_compiler.
     sljit_s32 e = sljit_get_compiler_error(g.C);
     error("jitgen: code generation failed for %s (sljit error %d)", fn->name, e);
   }
@@ -2771,8 +2771,8 @@ static void compile_function(JTU *tu, Obj *fn) {
   WidccRT *jrt = tu->rt;
   JitCode *jc = rt_alloc(sizeof(JitCode));
   jc->code = code;
-  jc->next = jrt->codes;
-  jrt->codes = jc;
+  jc->next = tu->cc->mod->codes;
+  tu->cc->mod->codes = jc;
 
   fn->jit_addr = code;
   if (fn->is_static)
@@ -2780,7 +2780,8 @@ static void compile_function(JTU *tu, Obj *fn) {
 
   // A later definition replaces an earlier one: new lookups resolve to the
   // new code and indirection cells are repointed. Old code stays alive (and
-  // callable through previously obtained pointers) until widcc_rt_free_funcs.
+  // callable through previously obtained pointers) until its module is
+  // unloaded.
   JitSym *s = jit_sym(jrt, fn->name, true);
   s->addr = code;
   if (s->cell)
@@ -2866,7 +2867,7 @@ static void emit_data(JTU *tu, Obj *prog) {
     } else {
       // All generated data lives on the runtime heap: machine code keeps
       // referring to it after the compiler (and its arena) is destroyed.
-      buf = rt_alloc_data(rt, MAX(sz, 1));
+      buf = rt_alloc_data(tu->cc, MAX(sz, 1));
       if (s) {
         s->addr = buf;
         s->is_tentative = var->is_tentative;

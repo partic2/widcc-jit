@@ -65,12 +65,12 @@ static void *rt_alloc_tracked(JitMallocBlock **list, size_t sz) {
   return p;
 }
 
-static void *rt_alloc_func(WidccRT *rt, size_t sz) {
-  return rt_alloc_tracked(&rt->func_aux, sz);
+static void *rt_alloc_func(WidccCompiler *cc, size_t sz) {
+  return rt_alloc_tracked(&cc->mod->func_aux, sz);
 }
 
-static void *rt_alloc_data(WidccRT *rt, size_t sz) {
-  return rt_alloc_tracked(&rt->data, sz);
+static void *rt_alloc_data(WidccCompiler *cc, size_t sz) {
+  return rt_alloc_tracked(&cc->mod->data, sz);
 }
 
 static void rt_free_blocks(JitMallocBlock **list) {
@@ -82,6 +82,33 @@ static void rt_free_blocks(JitMallocBlock **list) {
     b = nx;
   }
   *list = NULL;
+}
+
+// A module owns every runtime allocation made while its unit compiles.
+static WidccCode *rt_module_new(WidccRT *rt) {
+  WidccCode *m = rt_alloc(sizeof(*m));
+  memset(m, 0, sizeof(*m));
+  m->next = rt->modules;
+  rt->modules = m;
+  return m;
+}
+
+static void rt_module_free(WidccRT *rt, WidccCode *m) {
+  WidccCode **pp = &rt->modules;
+  while (*pp && *pp != m)
+    pp = &(*pp)->next;
+  if (*pp)
+    *pp = m->next;
+
+  for (JitCode *c = m->codes; c;) {
+    JitCode *nx = c->next;
+    sljit_free_code(c->code, NULL);
+    free(c);
+    c = nx;
+  }
+  rt_free_blocks(&m->func_aux);
+  rt_free_blocks(&m->data);
+  free(m);
 }
 
 static void free_path_array(char **paths, int count) {
@@ -124,22 +151,18 @@ static void **jit_sym_cell(JitSym *s) {
   return s->cell;
 }
 
-// Remove every symbol of one class, deleting map entries and releasing
-// per-symbol memory (name, indirection cell, entry itself).
-static void rt_drop_symbols(WidccRT *rt, bool funcs) {
-  JitSym **pp = &rt->symlist;
-  while (*pp) {
-    JitSym *s = *pp;
-    if (s->is_func == funcs) {
-      *pp = s->next;
-      hashmap_delete(&rt->syms, s->name);
-      free(s->cell);
-      free(s->name);
-      free(s);
-    } else {
-      pp = &s->next;
-    }
+// Release every symbol entry (names, cells, entries). Used only when the
+// runtime itself is destroyed; unloading a module leaves symbols alone.
+static void rt_free_symbols(WidccRT *rt) {
+  JitSym *s = rt->symlist;
+  while (s) {
+    JitSym *nx = s->next;
+    free(s->cell);
+    free(s->name);
+    free(s);
+    s = nx;
   }
+  rt->symlist = NULL;
 }
 
 
@@ -196,8 +219,9 @@ WidccRT *widcc_rt_new(void) {
 void widcc_rt_free(WidccRT *rt) {
   if (!rt)
     return;
-  widcc_rt_free_funcs(rt);
-  widcc_rt_free_vars(rt);
+  while (rt->modules)
+    rt_module_free(rt, rt->modules);
+  rt_free_symbols(rt);
   free_path_array(rt->inc_paths, rt->inc_count);
   hashmap_destroy(&rt->syms);
   free(rt);
@@ -275,30 +299,8 @@ int widcc_rt_list_symbols(WidccRT *rt, char **names, int bufsize) {
   return n;
 }
 
-void widcc_rt_free_funcs(WidccRT *rt) {
-  if (!rt)
-    return;
-  JitCode *c = rt->codes;
-  while (c) {
-    JitCode *nx = c->next;
-    sljit_free_code(c->code, NULL);
-    free(c);
-    c = nx;
-  }
-  rt->codes = NULL;
-  rt_free_blocks(&rt->func_aux);
-  rt_drop_symbols(rt, true);
-}
-
-void widcc_rt_free_vars(WidccRT *rt) {
-  if (!rt)
-    return;
-  rt_free_blocks(&rt->data);
-  rt_drop_symbols(rt, false);
-}
-
 // ------------------------------------------------------------------
-// Compiler
+// Load
 // ------------------------------------------------------------------
 
 static File *jit_add_file(CCCtx *ctx, char *name, char *contents) {
@@ -319,30 +321,7 @@ static void jit_apply_include_paths(CCCtx *ctx, WidccRT *rt) {
     strarray_push(&ctx->include_paths, cc_strdup(rt->inc_paths[i]));
 }
 
-WidccCompiler *widcc_cc_new(WidccRT *rt) {
-  if (!rt)
-    return NULL;
-  WidccCompiler *cc = calloc(1, sizeof(WidccCompiler));
-  if (!cc)
-    return NULL;
-  ccctx_init(&cc->cc);
-  cc->cc.err_print = false;
-  cc->rt = rt;
-  return cc;
-}
-
-void widcc_cc_free(WidccCompiler *cc) {
-  if (!cc)
-    return;
-  if (cc->active_compiler) {
-    sljit_free_compiler(cc->active_compiler);
-    cc->active_compiler = NULL;
-  }
-  ccctx_destroy(&cc->cc);
-  free(cc);
-}
-
-// Compile one translation unit into the runtime. When `source` is
+// Compile one translation unit into `cc->mod`. When `source` is
 // non-NULL it is the file's contents and `path` is only its name;
 // otherwise the unit is read from `path` on disk.
 static const char *jit_compile_core(WidccCompiler *cc, const char *path,
@@ -390,17 +369,56 @@ static const char *jit_compile_core(WidccCompiler *cc, const char *path,
   return NULL;
 }
 
-const char *widcc_cc_compile(WidccCompiler *cc, const char *path,
-                             const char *source) {
-  if (!cc || !path || !source)
-    return "widcc_cc_compile: invalid argument";
-  return jit_compile_core(cc, path, source);
+// A load is one ephemeral compiler whose allocations go to a module.
+static const char *rt_load(WidccRT *rt, const char *path, const char *source,
+                           WidccCode **out) {
+  WidccCompiler cc = {0};
+  ccctx_init(&cc.cc);
+  cc.cc.err_print = false;
+  cc.rt = rt;
+  cc.mod = rt_module_new(rt);
+
+  const char *err = jit_compile_core(&cc, path, source);
+  if (err) {
+    // The message lives in the compiler arena that is about to go away.
+    snprintf(rt->err_msg, sizeof(rt->err_msg), "%s", err);
+    rt_module_free(rt, cc.mod);
+    ccctx_destroy(&cc.cc);
+    return rt->err_msg;
+  }
+
+  if (out)
+    *out = cc.mod;
+  ccctx_destroy(&cc.cc);
+  return NULL;
 }
 
-const char *widcc_cc_compile_file(WidccCompiler *cc, const char *path) {
-  if (!cc || !path)
-    return "widcc_cc_compile_file: invalid argument";
-  return jit_compile_core(cc, path, NULL);
+const char *widcc_rt_load_code(WidccRT *rt, const char *path,
+                               const char *source, WidccCode **out) {
+  if (!rt || !path || !source)
+    return "widcc_rt_load_code: invalid argument";
+  return rt_load(rt, path, source, out);
+}
+
+const char *widcc_rt_load_code_file(WidccRT *rt, const char *path,
+                                    WidccCode **out) {
+  if (!rt || !path)
+    return "widcc_rt_load_code_file: invalid argument";
+  return rt_load(rt, path, NULL, out);
+}
+
+const char *widcc_rt_unload_code(WidccRT *rt, WidccCode *code) {
+  if (!code)
+    return NULL;
+  if (!rt)
+    return "widcc_rt_unload_code: invalid argument";
+  for (WidccCode *m = rt->modules; m; m = m->next) {
+    if (m == code) {
+      rt_module_free(rt, code);
+      return NULL;
+    }
+  }
+  return "widcc_rt_unload_code: module is not loaded in this runtime";
 }
 
 #endif // WIDCC_JIT_C

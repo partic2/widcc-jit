@@ -26,37 +26,42 @@ Options:
 
 ## API
 
-The public API is `include/widcc_jit.h` and is split into a runtime half
-and a compiler half.
+The public API is `include/widcc_jit.h`: one runtime type, one module
+handle and the file hooks.
 
-A **runtime** (`WidccRT`) owns a symbol map from name to symbol
-information (global functions and global variables), the generated machine
-code pages and the generated global data blocks. A **compiler**
-(`WidccCompiler`) is bound to one runtime and owns only its own
-compile-time memory.
+A **runtime** (`WidccRT`) owns the symbol map from name to symbol
+information (global functions and global variables) and the set of loaded
+modules. A **module** (`WidccCode`) is one loaded translation unit and
+owns the machine code pages, global data blocks and static call cells
+produced by it.
 
 ```c
 WidccRT *rt = widcc_rt_new();
 widcc_rt_add_func(rt, "host_fn", (void *)host_fn);   // optional host symbols
 
-WidccCompiler *cc = widcc_cc_new(rt);
-const char *err = widcc_cc_compile(cc, "prog.c", source);
+WidccCode *mod = NULL;
+const char *err = widcc_rt_load_code(rt, "prog.c", source, &mod);
 if (err) {
   fprintf(stderr, "%s\n", err);
 } else {
   int (*f)(int) = widcc_rt_lookup(rt, "f");
   f(42);
+  widcc_rt_unload_code(rt, mod);   // code and data of this unit
 }
 
-widcc_cc_free(cc);   // compile-time memory; generated code stays callable
-widcc_rt_free(rt);   // code, data and symbol entries
+widcc_rt_free(rt);   // unloads remaining modules, drops symbol entries
 ```
 
-`widcc_cc_compile_file(cc, "prog.c")` compiles a file read from disk
-instead of an in-memory string. In both forms the path is the unit's file
-name: quoted `#include "..."` directives resolve relative to it. Angle
-includes `#include <...>` search the list installed with
-`widcc_rt_set_include_paths()` (empty by default).
+`widcc_rt_load_code_file(rt, "prog.c", &mod)` reads the unit through the
+file hooks instead of taking an in-memory string. In both forms the path
+is the unit's file name: quoted `#include "..."` directives resolve
+relative to it. Angle includes `#include <...>` search the list installed
+with `widcc_rt_set_include_paths()` (empty by default).
+
+Loading follows the dynamic-loader model: a later module overrides earlier
+definitions of the same name, and unloading never restores them. Symbols
+keep their last definition even after the module that produced them is
+unloaded; calling through such a symbol is undefined, as with `dlclose()`.
 
 All source reading goes through the hooks installed by
 `widcc_set_file_ops()`: open/read/close for file contents and exists for
@@ -64,30 +69,25 @@ include resolution. The default uses stdio and `stat()` on the host
 filesystem; overriding them lets the frontend compile from an in-memory
 or virtual file system. Omitted callbacks keep their defaults, and passing
 NULL restores all of them. The hooks are process-global and must be set
-before compiling.
+before loading.
 
 Properties:
 
 - Fallible calls return NULL on success and an error message on failure;
-  constructors return NULL on failure. Error strings are owned by the
-  library (compiler messages stay valid until the next compile or
-  `widcc_cc_free()`).
-- Instances are independent; one process may hold any number of
-  runtime/compiler pairs.
-- One runtime may be shared by several compilers, and one compiler may
-  compile many translation units. Definitions from one unit are visible to
-  later units through the runtime.
-- Compile-time memory is arena-owned by the compiler and released by
-  `widcc_cc_free()`. To bound frontend memory when compiling many units,
-  create and free one compiler per unit while keeping the runtime.
+  constructors return NULL on failure. Load messages stay valid until the
+  next call on that runtime; all other messages are static.
+- Runtimes are independent; one process may hold any number of them.
+- Each load owns everything its unit allocated and releases it on unload,
+  including static functions, static variables and string literals.
+- Frontend memory (tokens, AST, types) is arena-owned by an internal
+  per-load compiler and released when the load returns, so it does not
+  accumulate across modules.
+- Definitions from one module are visible to modules loaded after it, so
+  forward declarations across translation units work as before.
 - Extern symbols resolve through the runtime map first, then through the
   host process (`dlsym(RTLD_DEFAULT, ...)` on Unix, exported modules on
   Windows). `widcc_rt_set_host_resolver()` installs a per-runtime
   replacement.
-- The runtime outlives any compiler: `widcc_cc_free()` never invalidates
-  symbols, code or data. Use `widcc_rt_free_funcs()` followed by
-  `widcc_rt_free_vars()` to release generated output while keeping the
-  runtime itself alive.
 
 ## Layout
 
@@ -96,8 +96,8 @@ Properties:
   allocator
 - `src/fileops.c` — default host file access behind `widcc_set_file_ops()`
 - `src/jitgen.c` — sljit code generation backend
-- `src/jit.c` `src/jit_internal.h` — runtime/compiler implementation and
-  internals
+- `src/jit.c` `src/jit_internal.h` — runtime, module load/unload and
+  symbol-map internals
 - `src/all.c` — single-translation-unit build root; internals stay static
 - `include/widcc_jit.h` — public API
 - `examples/` — jit_test, stress_svalue, mem_test

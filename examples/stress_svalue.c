@@ -12,10 +12,10 @@
     }                                                                       \
   } while (0)
 
-#define CK(cc, name, src) do { \
-  const char *err = widcc_cc_compile(cc, name, src); \
+#define CK(rt, name, src) do { \
+  const char *err = widcc_rt_load_code(rt, name, src, NULL); \
   if (err) { \
-    fprintf(stderr, "compile %s failed: %s\n", name, err); \
+    fprintf(stderr, "load %s failed: %s\n", name, err); \
     exit(1); \
   } \
 } while (0)
@@ -25,13 +25,12 @@ static double dadd(double a, double b) { return a + b; }
 
 int main(void) {
   WidccRT *rt = widcc_rt_new();
-  WidccCompiler *cc = widcc_cc_new(rt);
-  CHECK(rt && cc);
+  CHECK(rt != NULL);
   CHECK(widcc_rt_add_func(rt, "add3", (void *)add3) == NULL);
   CHECK(widcc_rt_add_func(rt, "dadd", (void *)dadd) == NULL);
 
   // Deep integer nesting: forces many simultaneous live values -> spills.
-  CK(cc, "deep.c",
+  CK(rt, "deep.c",
     "int deep(int a,int b,int c,int d){\n"
     "  return (a+b)*(c+d) + (a-b)*(c-d) + (a*c)-(b*d) + (a+d)*(b+c);\n"
     "}\n"
@@ -51,7 +50,7 @@ int main(void) {
   }
 
   // Call with many live values across it (spill_all + lazy reload).
-  CK(cc, "call.c",
+  CK(rt, "call.c",
     "int add3(int,int,int);\n"
     "double dadd(double,double);\n"
     "int callmid(int a,int b,int c,int d){\n"
@@ -75,7 +74,7 @@ int main(void) {
   }
 
   // Mixed float/int comparisons and casts, immediate folding.
-  CK(cc, "mix.c",
+  CK(rt, "mix.c",
     "int mix(int x,double d){\n"
     "  int r=0;\n"
     "  if (d>0.5) r+=1;\n"
@@ -97,7 +96,7 @@ int main(void) {
   }
 
   // Struct assignment with live values around it.
-  CK(cc, "struct.c",
+  CK(rt, "struct.c",
     "struct P{int x;int y;int z;};\n"
     "int st(int a,int b){\n"
     "  struct P p,q;\n"
@@ -110,7 +109,7 @@ int main(void) {
     CHECK(st(a,b)==(a+b+(a+b))+(a*b));
 
   // Logical short-circuit with side effects and live values.
-  CK(cc, "logic.c",
+  CK(rt, "logic.c",
     "int g;\n"
     "int bump(void){ g++; return 1; }\n"
     "int lg(int a,int b){\n"
@@ -125,7 +124,7 @@ int main(void) {
   CHECK(lg(0,1)==1*100+0);
 
   // Loop with a call and spilled accumulators.
-  CK(cc, "loop.c",
+  CK(rt, "loop.c",
     "int add3(int,int,int);\n"
     "int lp(int n){\n"
     "  int s=0,p=1;\n"
@@ -142,7 +141,7 @@ int main(void) {
   // Huffman coding: build the tree, derive codes, encode a message,
   // decode it back, and check the weighted path length (CLRS frequencies
   // {45,13,12,16,9,5} have optimal WPL 224).
-  CK(cc, "huffman.c",
+  CK(rt, "huffman.c",
     "int huffman(void){\n"
     "  int freq[6];\n"
     "  freq[0]=45; freq[1]=13; freq[2]=12; freq[3]=16; freq[4]=9; freq[5]=5;\n"
@@ -203,7 +202,7 @@ int main(void) {
   CHECK(huffman() == 0);
 
   // Recursive Hoare quicksort + lower-bound binary search.
-  CK(cc, "sort.c",
+  CK(rt, "sort.c",
     "void qs(int *a,int lo,int hi){\n"
     "  if (hi-lo<2) return;\n"
     "  int mid=lo+(hi-lo)/2;\n"
@@ -254,7 +253,7 @@ int main(void) {
   }
 
   // Sieve of Eratosthenes: pi(1000) = 168.
-  CK(cc, "sieve.c",
+  CK(rt, "sieve.c",
     "int primes(int n){\n"
     "  int flag[1000];\n"
     "  for (int i=0;i<n;i++) flag[i]=1;\n"
@@ -272,7 +271,7 @@ int main(void) {
   CHECK(primes(2) == 0);
 
   // 8x8 integer matrix product through flat pointers.
-  CK(cc, "matmul.c",
+  CK(rt, "matmul.c",
     "void mmul(int *a,int *b,int *c,int n){\n"
     "  for (int i=0;i<n;i++)\n"
     "    for (int j=0;j<n;j++){\n"
@@ -295,7 +294,7 @@ int main(void) {
   }
 
   // Sorted linked list over a static node pool, then in-place reversal.
-  CK(cc, "list.c",
+  CK(rt, "list.c",
     "struct Node { int val; struct Node *next; };\n"
     "struct Node pool[64];\n"
     "int used;\n"
@@ -341,7 +340,7 @@ int main(void) {
   CHECK(list_check() == 0);
 
   // Newton-Raphson square root: float division/multiplication in a loop.
-  CK(cc, "sqrt.c",
+  CK(rt, "sqrt.c",
     "double dsqrt(double x){\n"
     "  if (x<=0.0) return 0.0;\n"
     "  double r=x;\n"
@@ -360,7 +359,6 @@ int main(void) {
     CHECK(dsqrt(0.0) == 0.0);
   }
 
-  widcc_cc_free(cc);
   widcc_rt_free(rt);
   printf("stress: all tests passed\n");
   return 0;
