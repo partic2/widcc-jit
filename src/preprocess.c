@@ -1351,6 +1351,10 @@ static char *format_time(struct tm *tm) {
   return format("\"%02d:%02d:%02d\"", tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
+// Stringify a host macro's value (e.g. the NDK's __ANDROID_API__).
+#define WIDCC_XSTR_(x) #x
+#define WIDCC_XSTR(x) WIDCC_XSTR_(x)
+
 static void init_macros(void) {
   // Define predefined macros
   define_macro("__STDC_HOSTED__", "1");
@@ -1369,26 +1373,68 @@ static void init_macros(void) {
   define_macro("__signed__", "signed");
   define_macro("__volatile__", "volatile");
 
-#ifndef _WIN32
+  // Platform macros describe the host the JIT targets. They are taken
+  // from the compiler that builds widcc, so they stay correct for both
+  // native and -m32 builds. A host is not "unix" merely because it is
+  // not Windows: the unix marker comes from the build compiler itself.
+#ifdef _WIN32
+  define_macro("_WIN32", "1");
+#ifdef _WIN64
+  define_macro("_WIN64", "1");
+  define_macro("__MINGW64__", "1");
+#endif
+  define_macro("__MINGW32__", "1");
+  define_macro("__MSVCRT__", "1");
+#else
+#if defined(__unix__) || defined(__unix) || defined(__APPLE__)
   define_macro("unix", "1");
   define_macro("__unix", "1");
   define_macro("__unix__", "1");
-#else
-  define_macro("_WIN32", "1");
-  define_macro("_WIN64", "1");
-  define_macro("__MINGW32__", "1");
-  define_macro("__MINGW64__", "1");
-  define_macro("__MSVCRT__", "1");
+#ifdef __linux__
+  define_macro("linux", "1");
+  define_macro("__linux", "1");
+  define_macro("__linux__", "1");
+  define_macro("__gnu_linux__", "1");
+  define_macro("__ELF__", "1");
+#endif
+#endif
+  // Android (NDK) builds also carry the API level the JIT targets.
+#ifdef __ANDROID__
+  define_macro("__ANDROID__", "1");
+#ifdef __ANDROID_API__
+  define_macro("__ANDROID_API__", WIDCC_XSTR(__ANDROID_API__));
+#endif
+#ifdef __ANDROID_MIN_SDK_VERSION__
+  define_macro("__ANDROID_MIN_SDK_VERSION__",
+               WIDCC_XSTR(__ANDROID_MIN_SDK_VERSION__));
+#endif
+#endif
+#if defined(__LP64__) || defined(_LP64)
+  define_macro("_LP64", "1");
+  define_macro("__LP64__", "1");
+#endif
 #endif
 
-  define_macro("__BYTE_ORDER__", "1234");
   define_macro("__ORDER_BIG_ENDIAN__", "4321");
   define_macro("__ORDER_LITTLE_ENDIAN__", "1234");
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+  define_macro("__BYTE_ORDER__", "4321");
+#else
+  define_macro("__BYTE_ORDER__", "1234");
+#endif
 
+#if defined(__x86_64__) || defined(_M_X64)
   define_macro("__amd64", "1");
   define_macro("__amd64__", "1");
   define_macro("__x86_64", "1");
   define_macro("__x86_64__", "1");
+#elif defined(__i386__) || defined(_M_IX86)
+  define_macro("__i386", "1");
+  define_macro("__i386__", "1");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  define_macro("__aarch64__", "1");
+#endif
 
   define_macro("__widcc__", "1");
 
@@ -1565,4 +1611,6 @@ static Token *preprocess(Token *tok, char *input_file) {
 #undef pragma_once
 #undef include_guards
 #undef base_file
+#undef WIDCC_XSTR
+#undef WIDCC_XSTR_
 #endif // WIDCC_PREPROCESS_C

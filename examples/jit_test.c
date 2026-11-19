@@ -324,6 +324,86 @@ static void test_runtime_release(void) {
   widcc_rt_free(rt);
 }
 
+static void test_platform_macros(JIT *jit) {
+  // Platform macros must describe the host the JIT was built for, not a
+  // fixed architecture.
+#if defined(__x86_64__) || defined(_M_X64)
+  CHECK_COMPILE(jit, "arch.c",
+    "#if !defined(__x86_64__) || !defined(__amd64__) || defined(__i386__)\n"
+    "#error wrong architecture macros\n"
+    "#endif\n"
+    "int arch_ok(void) { return 1; }\n");
+#elif defined(__i386__) || defined(_M_IX86)
+  CHECK_COMPILE(jit, "arch.c",
+    "#if !defined(__i386__) || defined(__x86_64__)\n"
+    "#error wrong architecture macros\n"
+    "#endif\n"
+    "int arch_ok(void) { return 1; }\n");
+#else
+  CHECK_COMPILE(jit, "arch.c", "int arch_ok(void) { return 1; }\n");
+#endif
+  int (*arch_ok)(void) = widcc_rt_lookup(jit->rt, "arch_ok");
+  CHECK(arch_ok && arch_ok() == 1);
+
+  // Byte order follows the host.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
+    (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+  CHECK_COMPILE(jit, "endian.c",
+    "#if __BYTE_ORDER__ != __ORDER_BIG_ENDIAN__\n"
+    "#error wrong byte order\n"
+    "#endif\n"
+    "int endian_ok(void) { return 1; }\n");
+#else
+  CHECK_COMPILE(jit, "endian.c",
+    "#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__\n"
+    "#error wrong byte order\n"
+    "#endif\n"
+    "int endian_ok(void) { return 1; }\n");
+#endif
+  int (*endian_ok)(void) = widcc_rt_lookup(jit->rt, "endian_ok");
+  CHECK(endian_ok && endian_ok() == 1);
+
+  // LP64 markers only on non-Windows 64-bit hosts; Linux/ELF markers on
+  // Linux.
+#if !defined(_WIN32) && (defined(__LP64__) || defined(_LP64))
+  CHECK_COMPILE(jit, "lp64.c",
+    "#if !defined(__LP64__) || !defined(_LP64)\n"
+    "#error missing LP64 macros\n"
+    "#endif\n"
+    "int lp64_ok(void) { return 1; }\n");
+  int (*lp64_ok)(void) = widcc_rt_lookup(jit->rt, "lp64_ok");
+  CHECK(lp64_ok && lp64_ok() == 1);
+#endif
+#ifdef __linux__
+  CHECK_COMPILE(jit, "linux.c",
+    "#if !defined(__linux__) || !defined(__ELF__) || !defined(__unix__)\n"
+    "#error missing linux/unix macros\n"
+    "#endif\n"
+    "int linux_ok(void) { return 1; }\n");
+  int (*linux_ok)(void) = widcc_rt_lookup(jit->rt, "linux_ok");
+  CHECK(linux_ok && linux_ok() == 1);
+#endif
+#ifdef __ANDROID__
+  // Android inherits the Linux/unix markers and carries the NDK API level.
+  CHECK_COMPILE(jit, "android.c",
+    "#if !defined(__ANDROID__) || !defined(__ANDROID_API__)\n"
+    "#error missing android macros\n"
+    "#endif\n"
+    "#if !defined(__linux__) || !defined(__unix__)\n"
+    "#error android must keep linux/unix markers\n"
+    "#endif\n"
+    "int android_api(void) { return __ANDROID_API__; }\n");
+  int (*android_api)(void) = widcc_rt_lookup(jit->rt, "android_api");
+  CHECK(android_api && android_api() == __ANDROID_API__);
+#ifdef __ANDROID_MIN_SDK_VERSION__
+  CHECK_COMPILE(jit, "android_sdk.c",
+    "int android_sdk(void) { return __ANDROID_MIN_SDK_VERSION__; }\n");
+  int (*android_sdk)(void) = widcc_rt_lookup(jit->rt, "android_sdk");
+  CHECK(android_sdk && android_sdk() == __ANDROID_MIN_SDK_VERSION__);
+#endif
+#endif
+}
+
 // --- Additional algorithm / integer-width tests ---
 
 static void test_sorting(JIT *jit) {
@@ -708,6 +788,7 @@ int main(void) {
   test_int32_semantics(&jit);
   test_int64_semantics(&jit);
   test_data_model(&jit);
+  test_platform_macros(&jit);
 
   test_runtime_release();
 
