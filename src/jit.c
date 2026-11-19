@@ -1,8 +1,8 @@
 #ifndef WIDCC_JIT_C
 #define WIDCC_JIT_C
 
-// widcc JIT runtime: public API, symbol table, namespace and compilation
-// pipeline. See widcc_jit.h for the memory / namespace model.
+// widcc JIT runtime: public API, symbol table and compilation pipeline.
+// See widcc_jit.h for the memory model.
 #include "widcc.h"
 #include "ccctx.h"
 #include "jit_internal.h"
@@ -15,196 +15,6 @@
 #else
 #include <dlfcn.h>
 #endif
-
-// ------------------------------------------------------------------
-// WidccNamespace: malloc-backed open-addressing hash table.
-// Independent of any JIT instance. Simple variant — deletions use
-// tombstones and the table rehashes / compacts itself on insertion
-// when load factor exceeds the HIGH watermark.
-// ------------------------------------------------------------------
-
-#define NS_INIT_CAP 16
-#define NS_HIGH     70  // percent
-#define NS_LOW      50  // percent (target after rehash, to keep capacity)
-
-typedef struct NSEntry {
-  char *key;
-  void *addr;
-} NSEntry;
-
-struct WidccNamespace {
-  NSEntry *buckets;
-  int capacity;  // allocated bucket count
-  int live;      // keys present (non-tombstone)
-  int used;      // live + tombstones — probing stops at `used` consecutive
-                 // slots or an empty (key==NULL) slot, whichever hits first
-};
-
-#define NS_TOMB ((char *)1)
-
-static uint64_t ns_fnv(const char *s, int len) {
-  uint64_t h = 0xcbf29ce484222325ULL;
-  for (int i = 0; i < len; i++) {
-    h *= 0x100000001b3ULL;
-    h ^= (unsigned char)s[i];
-  }
-  return h;
-}
-
-// Find `key` in the table. On match returns the entry pointer.
-// On miss returns NULL. The second form additionally writes the empty-slot
-// position to *out_slot (if out_slot != NULL) so the caller can insert
-// without re-probing.
-static NSEntry *ns_probe(WidccNamespace *ns, const char *key, int keylen,
-                         int *out_slot) {
-  if (out_slot) *out_slot = -1;
-  if (!ns->buckets) return NULL;
-  uint64_t h = ns_fnv(key, keylen);
-  for (int i = 0; i < ns->capacity; i++) {
-    int idx = (h + i) % ns->capacity;
-    NSEntry *e = &ns->buckets[idx];
-    if (!e->key) {
-      if (out_slot && *out_slot < 0) *out_slot = idx;
-      return NULL;
-    }
-    if (e->key == NS_TOMB) {
-      if (out_slot && *out_slot < 0) *out_slot = idx;
-      continue;
-    }
-    if ((int)strlen(e->key) == keylen && memcmp(e->key, key, keylen) == 0)
-      return e;
-  }
-  return NULL;
-}
-
-static void ns_rehash(WidccNamespace *ns) {
-  if (ns->capacity == 0) return;
-  int new_cap = ns->capacity;
-  while ((ns->live * 100) / new_cap >= NS_LOW) new_cap *= 2;
-  if (new_cap == ns->capacity) return; // nothing to do
-  WidccNamespace tmp = {0};
-  tmp.capacity = new_cap;
-  tmp.buckets = calloc(new_cap, sizeof(NSEntry));
-  if (!tmp.buckets) return; // leave the old table in place
-  int old_live = ns->live;
-  for (int i = 0; i < ns->capacity; i++) {
-    NSEntry *e = &ns->buckets[i];
-    if (e->key && e->key != NS_TOMB)
-      widcc_ns_put(&tmp, e->key, e->addr);
-  }
-  free(ns->buckets);
-  *ns = tmp;
-  // tmp's buckets transferred via assignment; re-live assertion:
-  assert(ns->live == old_live);
-}
-
-// --- public WidccNamespace API ---
-
-WidccNamespace *widcc_ns_new(void) {
-  WidccNamespace *ns = calloc(1, sizeof(*ns));
-  if (!ns) return NULL;
-  ns->capacity = NS_INIT_CAP;
-  ns->buckets = calloc(ns->capacity, sizeof(NSEntry));
-  if (!ns->buckets) { free(ns); return NULL; }
-  return ns;
-}
-
-void widcc_ns_free(WidccNamespace *ns) {
-  if (!ns) return;
-  for (int i = 0; i < ns->capacity; i++) {
-    NSEntry *e = &ns->buckets[i];
-    if (e->key && e->key != NS_TOMB) free(e->key);
-  }
-  free(ns->buckets);
-  free(ns);
-}
-
-int widcc_ns_put(WidccNamespace *ns, const char *name, void *addr) {
-  if (!ns || !name || !addr) return -1;
-  int keylen = (int)strlen(name);
-
-  // If load is too high, compact / grow before inserting.
-  if (ns->capacity > 0 && (ns->used * 100) / ns->capacity >= NS_HIGH)
-    ns_rehash(ns);
-
-  int slot = -1;
-  NSEntry *e = ns_probe(ns, name, keylen, &slot);
-  if (e) {
-    // overwrite
-    e->addr = addr;
-    return 0;
-  }
-  if (slot < 0) {
-    // table full of tombstones — rehash and retry.
-    ns_rehash(ns);
-    e = ns_probe(ns, name, keylen, NULL);
-    if (e) { e->addr = addr; return 0; }
-    // now there must be a real empty slot because rehash allocates new cap
-    slot = -1;
-    for (int i = 0; i < ns->capacity && slot < 0; i++)
-      if (!ns->buckets[i].key) slot = i;
-    if (slot < 0) return -1;
-  }
-  NSEntry *s = &ns->buckets[slot];
-  int was_tomb = (s->key == NS_TOMB);
-  s->key = malloc(keylen + 1);
-  if (!s->key) return -1;
-  memcpy(s->key, name, keylen + 1);
-  s->addr = addr;
-  ns->used++;   // incremented whether we re-used a tombstone or filled NULL
-  if (!was_tomb) ns->live++;
-  return 0;
-}
-
-int widcc_ns_del(WidccNamespace *ns, const char *name) {
-  if (!ns || !name) return -1;
-  int keylen = (int)strlen(name);
-  NSEntry *e = ns_probe(ns, name, keylen, NULL);
-  if (!e) return -1;
-  free(e->key);
-  e->key = NS_TOMB;
-  ns->live--;
-  return 0;
-}
-
-void *widcc_ns_get(WidccNamespace *ns, const char *name) {
-  if (!ns || !name || !ns->buckets) return NULL;
-  int keylen = (int)strlen(name);
-  NSEntry *e = ns_probe(ns, name, keylen, NULL);
-  return e ? e->addr : NULL;
-}
-
-void widcc_ns_clear(WidccNamespace *ns) {
-  if (!ns) return;
-  for (int i = 0; i < ns->capacity; i++) {
-    NSEntry *e = &ns->buckets[i];
-    if (e->key && e->key != NS_TOMB) { free(e->key); e->key = NULL; }
-  }
-  ns->live = 0;
-  ns->used = 0;
-}
-
-void widcc_ns_foreach(WidccNamespace *ns, widcc_ns_iter_cb cb, void *user) {
-  if (!ns || !cb) return;
-  for (int i = 0; i < ns->capacity; i++) {
-    NSEntry *e = &ns->buckets[i];
-    if (e->key && e->key != NS_TOMB) {
-      if (cb(ns, e->key, e->addr, user)) return;
-    }
-  }
-}
-
-// --- namespace hooks used by the JIT ---
-
-static void *jit_ns_lookup(WidccJIT *jit, char *name) {
-  if (!jit || !jit->ns || !name) return NULL;
-  return widcc_ns_get(jit->ns, name);
-}
-
-static void jit_ns_push(WidccJIT *jit, const char *name, void *addr) {
-  if (!jit || !jit->ns || !jit->sync_ns || !name || !addr) return;
-  widcc_ns_put(jit->ns, name, addr);
-}
 
 // ------------------------------------------------------------------
 // Tiered release helpers (all public, declared in widcc_jit.h)
@@ -307,13 +117,11 @@ static void **jit_sym_cell(JitSym *s, WidccJIT *jit) {
   return s->cell;
 }
 
-// ---------- host resolution: instance → namespace → dlsym ----------
+// ---------- host resolution: instance → host ----------
 
 static void *jit_host_resolve(WidccJIT *jit, char *name) {
   JitSym *s = hashmap_get(&jit->syms, name);
   if (s && s->addr) return s->addr;
-  void *n = jit_ns_lookup(jit, name);
-  if (n) return n;
 #ifdef _WIN32
   void *addr = (void *)GetProcAddress(GetModuleHandleA(NULL), name);
   if (addr) return addr;
@@ -362,7 +170,6 @@ void widcc_jit_free(WidccJIT *jit) {
     jit->active_compiler = NULL;
   }
   ccctx_destroy(&jit->cc);
-  // Note: attached namespace is owned by the caller — we only drop the ref.
   free(jit);
 }
 
@@ -408,17 +215,6 @@ int widcc_jit_compile(WidccJIT *jit, const char *name, const char *source) {
   return jit_compile_core(jit, name, source);
 }
 
-int widcc_jit_compile_ns(WidccJIT *jit, const char *name,
-                         const char *source, void *ns) {
-  if (!jit || !source) return -1;
-  WidccNamespace *prev = jit->ns;
-  int prev_sync = jit->sync_ns;
-  if (ns) { jit->ns = (WidccNamespace *)ns; jit->sync_ns = 1; }
-  int r = jit_compile_core(jit, name, source);
-  jit->ns = prev; jit->sync_ns = prev_sync;
-  return r;
-}
-
 const char *widcc_jit_error(WidccJIT *jit) {
   if (!jit) return "widcc-jit: no instance";
   return jit->cc.err_msg;
@@ -427,8 +223,7 @@ const char *widcc_jit_error(WidccJIT *jit) {
 void *widcc_jit_symbol(WidccJIT *jit, const char *name) {
   if (!jit || !name) return NULL;
   JitSym *s = hashmap_get(&jit->syms, (char *)name);
-  if (s && s->addr) return s->addr;
-  return widcc_ns_get(jit->ns, name);
+  return (s && s->addr) ? s->addr : NULL;
 }
 
 int widcc_jit_map_symbol(WidccJIT *jit, const char *name, void *addr) {
@@ -439,26 +234,18 @@ int widcc_jit_map_symbol(WidccJIT *jit, const char *name, void *addr) {
   if (s->cell) *s->cell = addr;
   else         *jit_sym_cell(s, jit) = addr;
   cc_ctx = NULL;
-  if (jit->ns) widcc_ns_put(jit->ns, name, addr);
   return 0;
 }
 
-void widcc_jit_attach_ns(WidccJIT *jit, WidccNamespace *ns, int sync) {
+int widcc_jit_symbols_count(WidccJIT *jit) {
+  if (!jit) return -1;
+  return hashmap_size(&jit->syms);
+}
+
+void widcc_jit_list_symbols(WidccJIT *jit, char **names) {
   if (!jit) return;
-  jit->ns = ns;
-  jit->sync_ns = sync;
-}
-
-WidccNamespace *widcc_jit_detach_ns(WidccJIT *jit) {
-  if (!jit) return NULL;
-  WidccNamespace *ns = jit->ns;
-  jit->ns = NULL; jit->sync_ns = 0;
-  return ns;
+  hashmap_keys(&jit->syms, names);
 }
 
 
-#undef NS_INIT_CAP
-#undef NS_HIGH
-#undef NS_LOW
-#undef NS_TOMB
 #endif // WIDCC_JIT_C

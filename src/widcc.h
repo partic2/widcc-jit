@@ -82,6 +82,9 @@ static void hashmap_put(HashMap *map, char *key, void *val);
 static void hashmap_put2(HashMap *map, char *key, int keylen, void *val);
 static void hashmap_delete(HashMap *map, char *key);
 static void hashmap_delete2(HashMap *map, char *key, int keylen);
+static int hashmap_size(HashMap *map);
+static void hashmap_keys(HashMap *map, char **keys);
+
 
 //
 // strings.c

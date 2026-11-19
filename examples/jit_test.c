@@ -2,8 +2,7 @@
 //
 // Covers: arithmetic, control flow, functions/recursion, forward references
 // across translation units, structs, arrays, pointers, strings, global
-// variables, host symbol mapping, repeated compilation, namespace-based
-// external symbol sharing across multiple JIT instances, and tiered
+// variables, host symbol mapping, repeated compilation, and tiered
 // (code / runtime / arena) release.
 #include "widcc_jit.h"
 #include <assert.h>
@@ -258,102 +257,6 @@ static void test_error_recovery(WidccJIT *jit) {
   CHECK_COMPILE(jit, "ok.c", "int still_ok(void) { return 7; }\n");
   int (*still_ok)(void) = widcc_jit_symbol(jit, "still_ok");
   assert(still_ok && still_ok() == 7);
-}
-
-// --- Namespace tests ---
-
-// Static helper for test_namespace_basic's foreach callback (C has no lambdas).
-static int ns_count_cb(WidccNamespace *ns, const char *name,
-                       void *addr, void *user) {
-  (void)ns; (void)name; (void)addr;
-  int *s = (int *)user;
-  (*s)++;
-  return 0;
-}
-
-static void test_namespace_basic(void) {
-  WidccNamespace *ns = widcc_ns_new();
-  assert(ns);
-
-  // Put / get / del.
-  int magic = 0xDEAD;
-  assert(widcc_ns_put(ns, "magic", &magic) == 0);
-  assert(widcc_ns_get(ns, "magic") == &magic);
-  assert(widcc_ns_del(ns, "magic") == 0);
-  assert(widcc_ns_get(ns, "magic") == NULL);
-  assert(widcc_ns_del(ns, "magic") == -1);
-
-  // Overwrite.
-  int a = 1, b = 2;
-  widcc_ns_put(ns, "x", &a);
-  widcc_ns_put(ns, "x", &b);
-  assert(widcc_ns_get(ns, "x") == &b);
-
-  // Clear.
-  widcc_ns_clear(ns);
-  assert(widcc_ns_get(ns, "x") == NULL);
-
-  // Iterate.
-  widcc_ns_put(ns, "a", &a);
-  widcc_ns_put(ns, "b", &b);
-  int count = 0;
-  widcc_ns_foreach(ns, ns_count_cb, &count);
-  assert(count == 2);
-
-  widcc_ns_free(ns);
-}
-
-static void test_namespace_cross_jit(void) {
-  // Two JIT instances share one namespace, no attach sync.
-  WidccNamespace *ns = widcc_ns_new();
-
-  WidccJIT *jit1 = widcc_jit_new();
-  WidccJIT *jit2 = widcc_jit_new();
-
-  // jit1 defines a function; compile pushes it into ns because sync=1.
-  widcc_jit_attach_ns(jit1, ns, /*sync=*/1);
-  CHECK_COMPILE(jit1, "shared.c",
-    "int double_it(int x) { return x * 2; }\n"
-    "int shared_counter = 100;\n");
-
-  // jit2 (attached with sync=0) can still resolve via the shared ns
-  // because resolution falls back to ns regardless of sync setting.
-  widcc_jit_attach_ns(jit2, ns, /*sync=*/0);
-  CHECK_COMPILE(jit2, "use_shared.c",
-    "int double_it(int x);\n"
-    "extern int shared_counter;\n"
-    "int use(int x) { return double_it(x) + shared_counter; }\n");
-
-  int (*use)(int) = widcc_jit_symbol(jit2, "use");
-  assert(use && use(5) == 110);
-
-  widcc_jit_free(jit1);
-  widcc_jit_free(jit2);
-  widcc_ns_free(ns);
-}
-
-static void test_compile_ns_override(void) {
-  // compile_ns overrides the attached namespace for one call.
-  WidccJIT *jit = widcc_jit_new();
-  WidccNamespace *ns = widcc_ns_new();
-
-  widcc_jit_attach_ns(jit, ns, 0);
-
-  // Put a stub in the ns before compile so the TU sees it.
-  static int stub_sentinel = 12345;
-  widcc_ns_put(ns, "sentinel", &stub_sentinel);
-  assert(widcc_jit_compile_ns(jit, "use_ns.c",
-    "extern int sentinel;\n"
-    "int pick_sentinel(void) { return sentinel; }\n",
-    ns) == 0);
-
-  int *sentinel_addr = widcc_jit_symbol(jit, "sentinel");
-  // compile_ns forced sync, so the JIT's own table should have it.
-  assert(sentinel_addr == &stub_sentinel);
-  (void)sentinel_addr;
-
-  widcc_jit_free(jit);
-  widcc_ns_free(ns);
 }
 
 static void test_tiered_release(void) {
@@ -784,10 +687,6 @@ int main(void) {
   test_int64_semantics(jit);
   test_data_model(jit);
 
-  // Namespace tests.
-  test_namespace_basic();
-  test_namespace_cross_jit();
-  test_compile_ns_override();
   test_tiered_release();
 
   // Two separate instances still work as before.

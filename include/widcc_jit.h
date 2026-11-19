@@ -12,14 +12,6 @@
 //
 // Each tier can be released independently via widcc_jit_free_{code,rt,arena}
 // as long as lower-numbered tiers have been released first.
-//
-// Symbol namespace
-// ----------------
-//   A WidccNamespace is a standalone, reference-count-free dict of
-//   {char *name, void *addr} owned by the host. Namespaces can be
-//   attached to a JIT instance so that unresolved externs fall back to
-//   them during compilation; the compile can also push newly defined
-//   externs back into the attached namespace (sync mode).
 #ifndef WIDCC_JIT_H
 #define WIDCC_JIT_H
 
@@ -65,15 +57,10 @@ void widcc_jit_free_arena(WidccJIT *jit);
 // Compile a translation unit from a NUL-terminated C source string.
 // `name` is used in diagnostics. Symbols defined by earlier compilations
 // are visible; unresolved externs are looked up through the instance
-// symbol table → attached namespace → host (dlsym on Unix, exported
-// symbols on Windows).
+// symbol table, then the host process (dlsym on Unix, exported symbols
+// on Windows).
 // Returns 0 on success, -1 on error (see widcc_jit_error()).
 int widcc_jit_compile(WidccJIT *jit, const char *name, const char *source);
-
-// Same as widcc_jit_compile but overrides the JIT's attached namespace
-// just for this call. Pass NULL to use the attached one (if any).
-int widcc_jit_compile_ns(WidccJIT *jit, const char *name,
-                         const char *source, void *ns);
 
 // The last error message of this instance.
 const char *widcc_jit_error(WidccJIT *jit);
@@ -86,54 +73,13 @@ void *widcc_jit_symbol(WidccJIT *jit, const char *name);
 
 // Register a host symbol so JIT code can reference it. Registration
 // overrides automatic host-process symbol resolution and is recorded in
-// the instance symbol table; if an attached namespace is in sync mode
-// it is updated too.
+// the instance symbol table.
 // Returns 0 on success, -1 on error.
 int widcc_jit_map_symbol(WidccJIT *jit, const char *name, void *addr);
 
-// ---------- WidccNamespace ----------
-
-typedef struct WidccNamespace WidccNamespace;
-
-// Create / destroy a standalone symbol namespace. The namespace is
-// independent of any JIT instance — attach it with widcc_jit_attach_ns
-// to make it participate in resolution.
-WidccNamespace *widcc_ns_new(void);
-void widcc_ns_free(WidccNamespace *ns);
-
-// Add or update a symbol in the namespace. `addr` must be non-NULL.
-// Returns 0 on success, -1 on allocation failure.
-int widcc_ns_put(WidccNamespace *ns, const char *name, void *addr);
-
-// Remove a symbol. Returns 0 if it existed, -1 if not.
-int widcc_ns_del(WidccNamespace *ns, const char *name);
-
-// Look up a symbol. Returns NULL if missing.
-void *widcc_ns_get(WidccNamespace *ns, const char *name);
-
-// Remove every symbol. Does not release the namespace itself.
-void widcc_ns_clear(WidccNamespace *ns);
-
-// Iterate every symbol. `cb(ns, name, addr, user)` is called for each
-// entry; returning non-zero stops iteration.
-typedef int (*widcc_ns_iter_cb)(WidccNamespace *ns, const char *name,
-                                void *addr, void *user);
-void widcc_ns_foreach(WidccNamespace *ns, widcc_ns_iter_cb cb, void *user);
-
-// ---------- JIT ↔ namespace binding ----------
-
-// Attach a namespace to a JIT instance. From this point on:
-//   1. Unresolved externs during compilation fall back to the namespace
-//      (after the instance's own table, before the host process).
-//   2. If sync is non-zero, newly defined externs are pushed back
-//      into the namespace so other compiles / other JIT instances sharing
-//      the same namespace can see them.
-// Passing NULL detaches. The caller retains ownership — the JIT does
-// not free the namespace when widcc_jit_free() is called.
-void widcc_jit_attach_ns(WidccJIT *jit, WidccNamespace *ns, int sync);
-
-// Detach and return the currently attached namespace (or NULL).
-WidccNamespace *widcc_jit_detach_ns(WidccJIT *jit);
+int widcc_jit_symbols_count(WidccJIT *jit);
+ 
+void widcc_jit_list_symbols(WidccJIT *jit, char **names);
 
 #ifdef __cplusplus
 }

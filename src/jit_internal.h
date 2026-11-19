@@ -10,10 +10,6 @@
 struct Obj;
 typedef struct Obj Obj;
 
-// Forward: WidccNamespace lives in widcc_jit.h; jit.c owns the implementation.
-struct WidccNamespace;
-typedef struct WidccNamespace WidccNamespace;
-
 // Doubly-linked block for runtime-owned allocations so they can be released
 // together with sljit code before the arena is torn down.
 typedef struct JitMallocBlock JitMallocBlock;
@@ -44,19 +40,10 @@ struct WidccJIT {
   JitCode *codes;                // machine code blocks
   JitMallocBlock *rt_blocks;     // runtime-owned data/cell blocks
   struct sljit_compiler *active_compiler;
-
-  // Attached namespace (weak reference — callers own the object).
-  WidccNamespace *ns;
-  int sync_ns;                   // if non-zero, push extern defs back to ns
 };
 
 // The runtime is built as a single translation unit (src/all.c); every
 // symbol declared here has internal linkage.
-
-// Ask the attached namespace (if sync_ns is set) to record a newly
-// defined extern symbol. Called from jitgen_tu after each function
-// compile and each data definition in emit_data.
-static void jit_ns_push(WidccJIT *jit, const char *name, void *addr);
 
 // Runtime-heap helpers (malloc + chain). JIT-owned memory that must outlive
 // the frontend arena goes through these instead of cc_malloc/cc_calloc.

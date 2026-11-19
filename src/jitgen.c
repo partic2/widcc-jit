@@ -2784,7 +2784,6 @@ static void compile_function(JTU *tu, Obj *fn) {
   s->addr = code;
   if (s->cell)
     *s->cell = code;
-  jit_ns_push(jit, fn->name, code);
 }
 
 //
@@ -2880,7 +2879,6 @@ static void emit_data(JTU *tu, Obj *prog) {
         // (e.g. `jit_map_symbol` or a forward reference), repoint it.
         if (s->cell)
           *s->cell = buf;
-        jit_ns_push(jit, var->name, buf);
       }
     }
     var->jit_addr = buf;

@@ -1,22 +1,13 @@
 // Memory lifecycle test: exercises every public API path — compilation,
-// code generation, symbol tables, namespaces, tiered release and error
-// recovery — and then releases everything. Run under LeakSanitizer (build
-// with -DWIDCC_SANITIZE=ON) to verify that the runtime reclaims all memory.
+// code generation, symbol tables, tiered release and error recovery — and
+// then releases everything. Run under LeakSanitizer (build with
+// -DWIDCC_SANITIZE=ON) to verify that the runtime reclaims all memory.
 #include "widcc_jit.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
 static int host_add(int a, int b) { return a + b; }
-
-static int ns_count_cb(WidccNamespace *ns, const char *name, void *addr,
-                       void *user) {
-  (void)ns;
-  (void)name;
-  (void)addr;
-  (*(int *)user)++;
-  return 0;
-}
 
 int main(void) {
   // 1. Empty instance lifecycle.
@@ -68,44 +59,7 @@ int main(void) {
   assert(caller && caller(4) == 45);
   widcc_jit_free(jit);
 
-  // 5. Namespace lifecycle, attach/detach, sync push, compile_ns.
-  WidccNamespace *ns = widcc_ns_new();
-  assert(ns);
-  assert(widcc_ns_put(ns, "host_add", (void *)host_add) == 0);
-  assert(widcc_ns_get(ns, "host_add") == (void *)host_add);
-  assert(widcc_ns_del(ns, "host_add") == 0);
-  assert(widcc_ns_del(ns, "host_add") == -1);
-  assert(widcc_ns_put(ns, "host_add", (void *)host_add) == 0);
-
-  jit = widcc_jit_new();
-  widcc_jit_attach_ns(jit, ns, 1);
-  assert(widcc_jit_compile(jit, "n1.c",
-    "int pubfn(int x){ return x+7; }\n") == 0);
-  assert(widcc_jit_compile(jit, "n2.c",
-    "int host_add(int,int);\n"
-    "int pubfn(int);\n"
-    "int use(int x){ return pubfn(x)+host_add(x,x); }\n") == 0);
-  int (*use)(int) = widcc_jit_symbol(jit, "use");
-  assert(use && use(3) == 10 + 6);
-
-  int count = 0;
-  widcc_ns_foreach(ns, ns_count_cb, &count);
-  assert(count >= 2); // pubfn pushed back by sync mode, host_add present
-  assert(widcc_jit_detach_ns(jit) == ns);
-
-  // Per-call namespace override.
-  assert(widcc_jit_compile_ns(jit, "n3.c",
-    "int host_add(int,int);\n"
-    "int addone(int x){ return host_add(x,1); }\n", ns) == 0);
-  int (*addone)(int) = widcc_jit_symbol(jit, "addone");
-  assert(addone && addone(41) == 42);
-  widcc_jit_free(jit);
-
-  widcc_ns_clear(ns);
-  assert(widcc_ns_get(ns, "host_add") == NULL);
-  widcc_ns_free(ns);
-
-  // 6. Error recovery: failed compiles must release their scratch state.
+  // 5. Error recovery: failed compiles must release their scratch state.
   jit = widcc_jit_new();
   for (int i = 0; i < 5; i++) {
     assert(widcc_jit_compile(jit, "bad.c", "int broken( {") == -1);
@@ -117,7 +71,7 @@ int main(void) {
   assert(ok && ok() == 42);
   widcc_jit_free(jit);
 
-  // 7. Several live instances do not share ownership.
+  // 6. Several live instances do not share ownership.
   WidccJIT *a = widcc_jit_new();
   WidccJIT *b = widcc_jit_new();
   assert(a && b);

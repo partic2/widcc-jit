@@ -131,6 +131,20 @@ static void hashmap_delete2(HashMap *map, char *key, int keylen) {
     ent->key = TOMBSTONE;
 }
 
+static int hashmap_size(HashMap *map) {
+  return map->used;
+}
+
+static void hashmap_keys(HashMap *map, char **keys) {
+  int nkeys = 0;
+  for (int i = 0; i < map->capacity; i++) {
+    HashEntry *ent = &map->buckets[i];
+    if (ent->key && ent->key != TOMBSTONE) {
+      keys[nkeys++] = ent->key;
+    }
+  }
+}
+
 
 #undef INIT_SIZE
 #undef HIGH_WATERMARK
