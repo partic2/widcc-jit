@@ -378,7 +378,7 @@ static int jit_compile_core(WidccCompiler *cc, const char *path,
     char *p = cc_strdup((char *)path);
     cur->next = tokenize_file(p, &last, NULL);
     if (!cur->next)
-      error("cannot open %s: %s", p, strerror(errno));
+      error("cannot open %s", p);
   }
 
   Token *tok = preprocess(head.next, (char *)path);

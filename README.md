@@ -57,6 +57,14 @@ name: quoted `#include "..."` directives resolve relative to it. Angle
 includes `#include <...>` search the list installed with
 `widcc_rt_set_include_paths()` (empty by default).
 
+All source reading goes through the hooks installed by
+`widcc_set_file_ops()`: open/read/close for file contents and exists for
+include resolution. The default uses stdio and `stat()` on the host
+filesystem; overriding them lets the frontend compile from an in-memory
+or virtual file system. Omitted callbacks keep their defaults, and passing
+NULL restores all of them. The hooks are process-global and must be set
+before compiling.
+
 Properties:
 
 - Instances are independent; one process may hold any number of
@@ -81,6 +89,7 @@ Properties:
 - `src/tokenize.c` `src/preprocess.c` `src/parse.c` `src/type.c` — C frontend
 - `src/ccctx.c` / `src/ccctx.h` — per-instance compiler context and arena
   allocator
+- `src/fileops.c` — default host file access behind `widcc_set_file_ops()`
 - `src/jitgen.c` — sljit code generation backend
 - `src/jit.c` `src/jit_internal.h` — runtime/compiler implementation and
   internals

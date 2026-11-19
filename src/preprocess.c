@@ -925,7 +925,7 @@ static Token *include_file(Token *tok, char *path, Token *filename_tok, int *inc
   Token *end = NULL;
   Token *start = tokenize_file(path, &end, incl_no);
   if (!start)
-    error_tok(filename_tok, "%s: cannot open file: %s", path, strerror(errno));
+    error_tok(filename_tok, "%s: cannot open file", path);
   if (!end)
     return tok;
 
@@ -1210,28 +1210,6 @@ static Token *counter_macro(Token *start) {
   return tok;
 }
 
-// __TIMESTAMP__ is expanded to a string describing the last
-// modification time of the current file. E.g.
-// "Fri Jul 24 01:32:50 2020"
-static Token *timestamp_macro(Token *start) {
-  Token *tok;
-  struct stat st;
-  if (stat(start->file->name, &st) != 0) {
-    tok = new_str_token("??? ??? ?? ??:??:?? ????", start);
-  } else {
-    char buf[30];
-#ifdef _WIN32
-    ctime_s(buf, sizeof(buf), &st.st_mtime);
-#else
-    ctime_r(&st.st_mtime, buf);
-#endif
-    buf[24] = '\0';
-    tok = new_str_token(buf, start);
-  }
-  tok->next = start->next;
-  return tok;
-}
-
 static Token *base_file_macro(Token *start) {
   Token *tok = new_str_token(base_file, start);
   tok->next = start->next;
@@ -1437,7 +1415,6 @@ static void init_macros(void) {
   add_builtin("__FILE__", file_macro);
   add_builtin("__LINE__", line_macro);
   add_builtin("__COUNTER__", counter_macro);
-  add_builtin("__TIMESTAMP__", timestamp_macro);
   add_builtin("__BASE_FILE__", base_file_macro);
   add_builtin("__STDC_VERSION__", stdver_macro);
 

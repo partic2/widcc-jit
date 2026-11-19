@@ -28,12 +28,36 @@
 #ifndef WIDCC_JIT_H
 #define WIDCC_JIT_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct WidccRT WidccRT;
 typedef struct WidccCompiler WidccCompiler;
+
+// ========== File I/O hooks ==========
+
+// Callbacks the frontend uses to read source files and probe paths.
+// Every field is optional: NULL keeps the default, which uses stdio and
+// stat() on the host filesystem. Override them to compile from a virtual
+// file system. `open` returns an opaque handle (owned by the callbacks)
+// or NULL if the path cannot be opened; `read` fills `buf` with up to
+// `size` bytes and returns the byte count, 0 at end of file; `exists`
+// returns nonzero if the path exists. The hooks are used for #include
+// resolution and by widcc_cc_compile_file().
+typedef struct WidccFileOps {
+  void *(*open)(const char *path);
+  size_t (*read)(void *file, void *buf, size_t size);
+  void (*close)(void *file);
+  int (*exists)(const char *path);
+} WidccFileOps;
+
+// Replace the file access hooks. The table is copied; pass NULL to
+// restore the host defaults. Process-global and not thread-safe: set it
+// before starting compilations.
+void widcc_set_file_ops(const WidccFileOps *ops);
 
 // ========== Runtime API ==========
 
@@ -109,10 +133,11 @@ void widcc_cc_free(WidccCompiler *cc);
 // Returns 0 on success, -1 on error (see widcc_cc_error()).
 int widcc_cc_compile(WidccCompiler *cc, const char *path, const char *source);
 
-// Compile a translation unit read from `path` on disk. The path is used
-// in diagnostics and as the base directory for quoted #include
-// directives. Returns 0 on success, -1 on error (unreadable file, syntax
-// error, ...; see widcc_cc_error()).
+// Compile a translation unit read from `path` through the file hooks
+// (the host filesystem by default). The path is used in diagnostics and
+// as the base directory for quoted #include directives. Returns 0 on
+// success, -1 on error (unreadable file, syntax error, ...; see
+// widcc_cc_error()).
 int widcc_cc_compile_file(WidccCompiler *cc, const char *path);
 
 // The last error message of this compiler.

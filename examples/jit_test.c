@@ -389,6 +389,73 @@ static void test_include_paths(JIT *jit) {
   remove(hdr);
 }
 
+// Minimal in-memory file system used to exercise the file hooks.
+typedef struct {
+  const char *path;
+  const char *data;
+  size_t size;
+  size_t pos;
+} VfsFile;
+
+#define VFS_ENTRY(path, text) {path, text, sizeof(text) - 1, 0}
+static VfsFile vfs_files[] = {
+  VFS_ENTRY("/vfs/vfs.h", "static int vfs_val(void) { return 42; }\n"),
+  VFS_ENTRY("/vfs/main.c",
+            "#include <vfs.h>\n"
+            "int vfs_answer(void) { return vfs_val(); }\n"),
+};
+#undef VFS_ENTRY
+
+static VfsFile *vfs_find(const char *path) {
+  for (size_t i = 0; i < sizeof(vfs_files) / sizeof(vfs_files[0]); i++)
+    if (!strcmp(vfs_files[i].path, path))
+      return &vfs_files[i];
+  return NULL;
+}
+
+static void *vfs_open(const char *path) {
+  VfsFile *f = vfs_find(path);
+  if (f)
+    f->pos = 0;
+  return f;
+}
+
+static size_t vfs_read(void *file, void *buf, size_t size) {
+  VfsFile *f = file;
+  size_t n = f->size - f->pos;
+  if (n > size)
+    n = size;
+  memcpy(buf, f->data + f->pos, n);
+  f->pos += n;
+  return n;
+}
+
+static void vfs_close(void *file) { (void)file; }
+
+static int vfs_exists(const char *path) { return vfs_find(path) != NULL; }
+
+static void test_file_ops(JIT *jit) {
+  WidccFileOps ops = {vfs_open, vfs_read, vfs_close, vfs_exists};
+  widcc_set_file_ops(&ops);
+
+  const char *paths[] = {"/vfs"};
+  CHECK(widcc_rt_set_include_paths(jit->rt, paths, 1) == 0);
+
+  // Both the unit itself and its #include go through the hooks.
+  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") == 0);
+  int (*answer)(void) = widcc_rt_lookup(jit->rt, "vfs_answer");
+  CHECK(answer && answer() == 42);
+
+  // "-" is an ordinary path now; it no longer means stdin.
+  CHECK(widcc_cc_compile_file(jit->cc, "-") == -1);
+
+  widcc_set_file_ops(NULL);
+  CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == 0);
+
+  // Host defaults are back: the virtual unit no longer exists.
+  CHECK(widcc_cc_compile_file(jit->cc, "/vfs/main.c") == -1);
+}
+
 static void test_runtime_release(void) {
   WidccRT *rt = widcc_rt_new();
   WidccCompiler *cc = widcc_cc_new(rt);
@@ -900,6 +967,7 @@ int main(void) {
   test_error_recovery(&jit);
   test_compile_file(&jit);
   test_include_paths(&jit);
+  test_file_ops(&jit);
   test_sorting(&jit);
   test_nested_loops(&jit);
   test_int32_semantics(&jit);

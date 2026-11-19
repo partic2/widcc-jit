@@ -6,7 +6,6 @@
 #endif
 #include <assert.h>
 #include <ctype.h>
-#include <errno.h>
 #ifndef _WIN32
 #include <libgen.h>
 #endif
@@ -17,12 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include <time.h>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+
+#include "widcc_jit.h"
 
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
@@ -93,7 +92,8 @@ typedef struct {
 static void strarray_push(StringArray *arr, char *s);
 static char *format(char *fmt, ...) FMTCHK(1,2);
 static int align_to(int n, int align);
-static bool file_exists(char *path);
+static const WidccFileOps *widcc_file_ops(void);
+static bool file_exists(const char *path);
 
 //
 // tokenize.c

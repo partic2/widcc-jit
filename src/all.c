@@ -7,6 +7,7 @@
 #include "widcc.h"
 
 #include "ccctx.c"
+#include "fileops.c"
 #include "hashmap.c"
 #include "strings.c"
 #include "unicode.c"

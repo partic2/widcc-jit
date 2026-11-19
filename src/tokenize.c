@@ -741,33 +741,29 @@ static Token *tokenize(File *file, Token **end) {
   return head.next;
 }
 
-// Returns the contents of a given file.
-static char *read_file(char *path) {
-  FILE *fp;
-
-  if (strcmp(path, "-") == 0) {
-    // By convention, read from stdin if a given filename is "-".
-    fp = stdin;
-  } else {
-    fp = fopen(path, "r");
-    if (!fp)
-      return NULL;
-  }
+// Returns the contents of a given file, read through the file hooks.
+static char *read_file(const char *path) {
+  const WidccFileOps *ops = widcc_file_ops();
+  void *fp = ops->open(path);
+  if (!fp)
+    return NULL;
 
   size_t buflen = 0;
   size_t cap = 4096;
   char *buf = (char *)cc_malloc(cap);
   if (!buf) {
-    if (fp != stdin) fclose(fp);
+    ops->close(fp);
     return NULL;
   }
 
   // Read the entire file.
   for (;;) {
     char buf2[4096];
-    size_t n = fread(buf2, 1, sizeof(buf2), fp);
+    size_t n = ops->read(fp, buf2, sizeof(buf2));
     if (n == 0)
       break;
+    if (n > sizeof(buf2))
+      n = sizeof(buf2);
 
     // Ensure capacity: +2 for potential trailing '\n' and '\0'.
     if (buflen + n + 2 > cap) {
@@ -776,7 +772,7 @@ static char *read_file(char *path) {
       char *newbuf = (char *)cc_realloc(buf, cap);
       if (!newbuf) {
         free(buf);
-        if (fp != stdin) fclose(fp);
+        ops->close(fp);
         return NULL;
       }
       buf = newbuf;
@@ -786,8 +782,7 @@ static char *read_file(char *path) {
     buflen += n;
   }
 
-  if (fp != stdin)
-    fclose(fp);
+  ops->close(fp);
 
   // Make sure that the last line is properly terminated with '\n'.
   if (buflen == 0 || buf[buflen - 1] != '\n')
