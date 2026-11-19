@@ -1,4 +1,4 @@
-# widcc-sljit
+# widcc-jit
 
 A JIT runtime for C, built from the [`widcc`](https://github.com/fuhsnn/widcc)
 compiler frontend (tokenizer, preprocessor, parser, types) with an
