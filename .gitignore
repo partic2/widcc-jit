@@ -1,11 +1,14 @@
-**/*~
-**/\#*
-**/*.o
-**/*.s
-**/a.out
+# Build artefacts produced by CMake out-of-source builds.
+# Everything inside build/ is regenerated entirely; don't commit any of it.
+/build/
+/build-*/
+
+# misc scratch
 /tmp*
 /thirdparty
 /slimcc
+/stage2
+
+# upstream test binaries (standalone widcc driver)
 /test/*.exe
 /test/c23/*.exe
-/stage2
