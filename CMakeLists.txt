@@ -116,4 +116,8 @@ if(WIDCC_BUILD_TESTS)
   target_link_libraries(mem_test PRIVATE widcc_jit)
   target_compile_options(mem_test PRIVATE ${WIDCC_WARNINGS})
   add_test(NAME mem_test COMMAND mem_test)
+
+  add_executable(run_c_file examples/run_c_file.c)
+  target_link_libraries(run_c_file PRIVATE widcc_jit)
+  target_compile_options(run_c_file PRIVATE ${WIDCC_WARNINGS})
 endif()
