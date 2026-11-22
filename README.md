@@ -83,7 +83,7 @@ Properties:
   per-load compiler and released when the load returns, so it does not
   accumulate across modules.
 - Definitions from one module are visible to modules loaded after it, so
-  forward declarations across translation units work as before.
+  forward declarations across translation units work.
 - Extern symbols resolve through the runtime map first, then through the
   host process (`dlsym(RTLD_DEFAULT, ...)` on Unix, exported modules on
   Windows). `widcc_rt_set_host_resolver()` installs a per-runtime

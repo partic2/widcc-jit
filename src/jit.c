@@ -1,8 +1,8 @@
 #ifndef WIDCC_JIT_C
 #define WIDCC_JIT_C
 
-// widcc JIT: Runtime API (symbol map + generated code/data ownership)
-// and Compiler API (frontend arena + compilation pipeline).
+// widcc JIT: runtime API (symbol map + generated code/data ownership) and
+// the per-load compilation pipeline.
 #include "widcc.h"
 #include "ccctx.h"
 #include "jit_internal.h"

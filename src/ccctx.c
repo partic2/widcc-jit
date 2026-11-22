@@ -54,7 +54,6 @@ static char *cc_strndup(char *s, size_t n) {
 
 static void ccctx_init(CCCtx *ctx) {
   memset(ctx, 0, sizeof(*ctx));
-  ctx->opt_std = STD_NONE;
   ctx->opt_reuse_stack = true;
   ctx->err_print = true;
 }

@@ -113,8 +113,6 @@ static void warn_tok(Token *tok, char *fmt, ...) {
   va_start(ap, fmt);
   verror_at(tok->file->name, tok->file->contents, tok->line_no, tok->loc, fmt, ap);
   va_end(ap);
-  if (ccctx()->opt_werror)
-    exit(1);
 }
 
 // Consumes the current token if it matches `op`.
@@ -160,7 +158,7 @@ static bool startswith(char *p, char *q) {
 static int read_ident(char *start) {
   char *p = start;
   uint32_t c = decode_utf8(&p, p);
-  if (!is_ident1(c) || (c == '$' && ccctx()->opt_cc1_asm_pp))
+  if (!is_ident1(c))
     return 0;
 
   for (;;) {
@@ -210,8 +208,6 @@ static int read_punct(char *p) {
     return is_repeat + 1;
   case '.':
     return (is_repeat && p[2] == *p) ? 3 : 1;
-  case '$':
-    return ccctx()->opt_cc1_asm_pp;
   case '(':
   case ')':
   case ',':
@@ -249,10 +245,8 @@ static bool is_keyword(Token *tok) {
     for (size_t i = 0; i < sizeof(kw) / sizeof(*kw); i++)
       hashmap_put(map, kw[i], (void *)1);
 
-    if (ccctx()->opt_std == STD_NONE)
-      hashmap_put(map, "asm", (void *)1);
-    if (ccctx()->opt_std == STD_NONE || ccctx()->opt_std >= STD_C23)
-      hashmap_put(map, "typeof", (void *)1);      
+    hashmap_put(map, "asm", (void *)1);
+    hashmap_put(map, "typeof", (void *)1);
   }
 
   return hashmap_get2(map, tok->loc, tok->len);
@@ -637,8 +631,6 @@ static Token *tokenize(File *file, Token **end) {
           p += 2;
         } else if (*p == '.') {
           p++;
-        } else if (*p == '$' && ccctx()->opt_cc1_asm_pp) {
-          break;
         } else {
           char *pos;
           if (!is_ident2(decode_utf8(&pos, p)))

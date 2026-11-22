@@ -29,15 +29,8 @@ typedef struct CCCtx {
   bool err_print; // also print errors to stderr
   char err_msg[2048];
 
-  // Driver options used by the frontend (owned by the instance for JIT use).
-  StdVer opt_std;
-  bool opt_werror;
-  bool opt_g;
-  bool opt_E;
-  bool opt_cc1_asm_pp;
   bool opt_reuse_stack;
   StringArray include_paths;
-  StringArray iquote_paths;
 
   // tokenize.c state
   File *current_file;

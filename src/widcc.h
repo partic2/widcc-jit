@@ -107,7 +107,6 @@ typedef enum {
   TK_STR,     // String literals
   TK_NUM,     // Numeric literals
   TK_PP_NUM,  // Preprocessing numbers
-  TK_FMARK,   // Filemarkers for -E
   TK_PMARK,   // Placermarkers
   TK_ATTR,    // GNU attribute
   TK_EOF,     // End-of-file markers
@@ -140,8 +139,6 @@ struct Token {
 
   File *file;       // Source location
   int line_no;      // Line number
-  int display_line_no;
-  int display_file_no;
   bool at_bol;      // True if this token is at beginning of line
   bool has_space;   // True if this token follows a space character
   bool dont_expand; // True if a macro token is encountered during the macro's expansion
@@ -499,16 +496,5 @@ static uint32_t decode_utf8(char **new_pos, char *p);
 static bool is_ident1(uint32_t c);
 static bool is_ident2(uint32_t c);
 static int display_width(char *p, int len);
-
-// C standard version, used by the frontend (ccctx.h, tokenize.c,
-// preprocess.c, parse.c).
-typedef enum {
-  STD_NONE = 0,
-  STD_C89,
-  STD_C99,
-  STD_C11,
-  STD_C17,
-  STD_C23
-} StdVer;
 
 #endif // WIDCC_H

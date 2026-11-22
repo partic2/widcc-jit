@@ -444,13 +444,13 @@ static void test_file_ops(JIT *jit) {
   int (*answer)(void) = widcc_rt_lookup(jit->rt, "vfs_answer");
   CHECK(answer && answer() == 42);
 
-  // "-" is an ordinary path now; it no longer means stdin.
+  // "-" is an ordinary path, not stdin; it is not in the virtual unit.
   CHECK(widcc_rt_load_code_file(jit->rt, "-", NULL) != NULL);
 
   widcc_set_file_ops(NULL);
   CHECK(widcc_rt_set_include_paths(jit->rt, NULL, 0) == NULL);
 
-  // Host defaults are back: the virtual unit no longer exists.
+  // Back on the host filesystem, the virtual unit does not exist.
   CHECK(widcc_rt_load_code_file(jit->rt, "/vfs/main.c", NULL) != NULL);
 }
 

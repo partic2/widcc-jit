@@ -91,7 +91,7 @@ struct CondIncl {
 static Token *preprocess2(Token *tok);
 static Macro *find_macro(Token *tok);
 static bool expand_macro(Token **rest, Token *tok);
-static Token *directives(Token **cur, Token *start);
+static Token *directives(Token *start);
 static Token *subst(Token *tok, MacroArg *args);
 static bool is_supported_attr(Token *tok);
 
@@ -130,14 +130,6 @@ static Token *to_eof(Token *tok) {
   tok->len = 0;
   tok->at_bol = true;
   return tok;
-}
-
-static Token *new_fmark(Token *tok){
-  Token *t = copy_token(tok);
-  t->kind = TK_FMARK;
-  t->len = 0;
-  t->line_no = 1;
-  return t;
 }
 
 static Token *new_pmark(Token *tok){
@@ -740,7 +732,7 @@ static Token *prepare_funclike_args(Token *start) {
       error_tok(start, "unterminated list");
 
     if (!locked_macros && is_hash(tok)) {
-      tok = directives(&cur, tok);
+      tok = directives(tok);
       continue;
     }
     if (locked_macros) {
@@ -850,11 +842,6 @@ static char *search_include_paths2(char *filename, Token *start, bool is_dquote,
     if (file_exists(path)) {
       return path;
     }
-    for (int i = 0; i < ccctx()->iquote_paths.len; i++) {
-      char *path = format("%s/%s", ccctx()->iquote_paths.data[i], filename);
-      if (file_exists(path))
-        return path;
-    }
   }
   return search_include_paths3(filename, incl_no);
 }
@@ -929,26 +916,11 @@ static Token *include_file(Token *tok, char *path, Token *filename_tok, int *inc
   if (!end)
     return tok;
 
-  Token *fmark = ccctx()->opt_E ? new_fmark(start) : NULL;
-
-  if (!end) {
-    if (fmark) {
-      fmark->next = tok;
-      return fmark;
-    }
-    return tok;
-  }
-
   if (is_hash(start) && equal(start->next, "ifndef") &&
       start->next->next->kind == TK_IDENT && equal(end, "endif"))
     start->next->guard_file = end->guard_file = path;
 
   end->next = tok;
-
-  if (fmark) {
-    fmark->next = start;
-    return fmark;
-  }
   return start;
 }
 
@@ -972,15 +944,6 @@ static void read_line_marker(Token **rest, Token *tok) {
   start->file->display_file = add_input_file(tok->str, NULL, NULL);
 }
 
-static void add_loc_info(Token *tok) {
-  Token *tmpl = tok;
-  if (tmpl->origin)
-    tmpl = tmpl->origin;
-
-  tok->display_file_no = tmpl->file->display_file->file_no;
-  tok->display_line_no = tmpl->line_no + tmpl->file->line_delta;
-}
-
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives.
 static Token *preprocess2(Token *tok) {
@@ -994,12 +957,9 @@ static Token *preprocess2(Token *tok) {
       continue;
 
     if (is_hash(tok) && !locked_macros) {
-      tok = directives(&cur, tok);
+      tok = directives(tok);
       continue;
     }
-
-    if (ccctx()->opt_g)
-      add_loc_info(tok);
 
     cur = cur->next = tok;
     tok = tok->next;
@@ -1011,7 +971,7 @@ static Token *preprocess2(Token *tok) {
   return head.next;
 }
 
-static Token *directives(Token **cur, Token *start) {
+static Token *directives(Token *start) {
   Token *tok = start->next;
 
   if (equal(tok, "include")) {
@@ -1126,15 +1086,6 @@ static Token *directives(Token **cur, Token *start) {
     return tok;
   }
 
-  if (equal(tok, "pragma") && ccctx()->opt_E) {
-    tok = start;
-    do {
-      *cur = (**cur).next = tok;
-      tok = tok->next;
-    } while (!tok->at_bol);
-    return tok;
-  }
-
   if (equal(tok, "pragma")) {
     do {
       tok = tok->next;
@@ -1148,15 +1099,6 @@ static Token *directives(Token **cur, Token *start) {
   if (equal(tok, "warning")) {
     warn_tok(tok, "warning");
     do {
-      tok = tok->next;
-    } while (!tok->at_bol);
-    return tok;
-  }
-
-  if (ccctx()->opt_cc1_asm_pp) {
-    tok = start;
-    do {
-      *cur = (**cur).next = tok;
       tok = tok->next;
     } while (!tok->at_bol);
     return tok;
@@ -1220,13 +1162,7 @@ static Token *stdver_macro(Token *tok) {
   tok->kind = TK_PP_NUM;
   tok->len = 7;
 
-  switch (ccctx()->opt_std) {
-  case STD_C99: tok->loc = "199901L"; break;
-  case STD_C11: tok->loc = "201112L"; break;
-  case STD_C17: tok->loc = "201710L"; break;
-  case STD_C23: tok->loc = "202311L"; break;
-  default: tok->loc = "201710L";
-  }
+  tok->loc = "201710L";
   return tok;
 }
 
@@ -1454,9 +1390,6 @@ static void join_adjacent_string_literals(Token *tok) {
   while (end->kind == TK_STR)
     end = end->next;
 
-  int fileno = tok->display_file_no;
-  int lineno = tok->display_line_no;
-
   // If regular string literals are adjacent to wide string literals,
   // regular string literals are converted to the wide type.
   StringKind kind = getStringKind(tok);
@@ -1489,9 +1422,6 @@ static void join_adjacent_string_literals(Token *tok) {
     memcpy(buf + i, t->str, t->ty->size);
     i = i + t->ty->size - t->ty->base->size;
   }
-
-  tok->display_file_no = fileno;
-  tok->display_line_no = lineno;
 
   tok->ty = array_of(basety, len);
   tok->str = buf;
@@ -1570,9 +1500,6 @@ static Token *preprocess(Token *tok, char *input_file) {
   tok = preprocess2(tok);
   if (cond_incl)
     error_tok(cond_incl->tok, "unterminated conditional directive");
-
-  if (ccctx()->opt_E)
-    return tok;
 
   return preprocess3(tok);
 }

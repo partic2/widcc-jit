@@ -1484,6 +1484,28 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 //   x[0][1] = 7;
 //   x[1][0] = 8;
 //   x[1][1] = 9;
+// A scalar initializer writes the whole object; the zero-fill pass exists
+// only to cover parts a (partial) aggregate initializer leaves unspecified.
+static bool scalar_initializer_covers(Type *ty, Initializer *init) {
+  if (!init->expr)
+    return false;
+  switch (ty->kind) {
+  case TY_BOOL:
+  case TY_CHAR:
+  case TY_SHORT:
+  case TY_INT:
+  case TY_LONG:
+  case TY_LONGLONG:
+  case TY_ENUM:
+  case TY_PTR:
+  case TY_FLOAT:
+  case TY_DOUBLE:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   Initializer *init = initializer(rest, tok, var->ty, &var->ty);
   InitDesg desg = {NULL, 0, NULL, var};
@@ -1492,8 +1514,11 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   // that unspecified elements are set to 0. Here, we simply
   // zero-initialize the entire memory region of a variable before
   // initializing it with user-supplied values.
-  Node *node = new_node(ND_MEMZERO, tok);
-  node->var = var;
+  Node *node = NULL;
+  if (!scalar_initializer_covers(var->ty, init)) {
+    node = new_node(ND_MEMZERO, tok);
+    node->var = var;
+  }
   chain_expr(&node, create_lvar_init(init, var->ty, &desg, tok));
   return node;
 }
@@ -1623,8 +1648,7 @@ static bool is_typename(Token *tok) {
     for (size_t i = 0; i < sizeof(kw) / sizeof(*kw); i++)
       hashmap_put(map, kw[i], (void *)1);
 
-    if (ccctx()->opt_std == STD_NONE || ccctx()->opt_std >= STD_C23)
-      hashmap_put(map, "typeof", (void *)1);
+    hashmap_put(map, "typeof", (void *)1);
   }
 
   return hashmap_get2(map, tok->loc, tok->len) || find_typedef(tok);
