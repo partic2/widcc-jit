@@ -942,6 +942,151 @@ static void test_data_model(JIT *jit) {
   CHECK(ptr_step() == 3);
 }
 
+// Functions with more than four parameters (and all variadic functions) use
+// the Block ABI: the JIT entry takes a single pointer to an array of 8-byte
+// argument slots, so the host must call such functions through a
+// one-pointer prototype and fill the slots itself.
+static void test_many_args(JIT *jit) {
+  CHECK_COMPILE(jit, "manyargs.c",
+    "int sum5(int a, int b, int c, int d, int e) { return a+b+c+d+e; }\n"
+    "int sum8(int a,int b,int c,int d,int e,int f,int g,int h) {\n"
+    "  return a+b+c+d+e+f+g+h;\n"
+    "}\n"
+    "double mix6(int a, double b, int c, double d, int e, double f) {\n"
+    "  return a + b + c + d + e + f;\n"
+    "}\n"
+    "int recsum(int n, int a, int b, int c, int d);\n"
+    "int start_rec(int a, int b, int c, int d) {\n"
+    "  return recsum(3, a, b, c, d);\n"
+    "}\n"
+    "int recsum(int n, int a, int b, int c, int d) {\n"
+    "  if (n <= 0) return a + b + c + d;\n"
+    "  return recsum(n - 1, a + 1, b + 1, c + 1, d + 1);\n"
+    "}\n"
+    "int apply5(int (*fn)(int,int,int,int,int), int a, int b, int c, int d, int e) {\n"
+    "  return fn(a, b, c, d, e);\n"
+    "}\n"
+    "int via_ptr(int a, int b, int c, int d, int e) {\n"
+    "  return apply5(sum5, a, b, c, d, e);\n"
+    "}\n"
+    "int call5(int a, int b, int c, int d, int e) { return sum5(a,b,c,d,e) * 2; }\n"
+    "int vhead(int a, ...) { return a + 1; }\n"
+    "int usev(int a, int b, int c, int d, int e) { return vhead(a,b,c,d,e); }\n"
+    "int usev2(int a, int b, int c) { return vhead(a,b,c); }\n");
+
+  // Block ABI entry points: one pointer to an array of 8-byte slots.
+  int (*sum5)(void *) = widcc_rt_lookup(jit->rt, "sum5");
+  int (*sum8)(void *) = widcc_rt_lookup(jit->rt, "sum8");
+  int (*call5)(void *) = widcc_rt_lookup(jit->rt, "call5");
+  int (*via_ptr)(void *) = widcc_rt_lookup(jit->rt, "via_ptr");
+  int (*usev)(void *) = widcc_rt_lookup(jit->rt, "usev");
+  double (*mix6)(void *) = widcc_rt_lookup(jit->rt, "mix6");
+  // Four parameters keep the native ABI, so the host calls these directly.
+  int (*usev2)(int, int, int) = widcc_rt_lookup(jit->rt, "usev2");
+  int (*start_rec)(int, int, int, int) = widcc_rt_lookup(jit->rt, "start_rec");
+  CHECK(sum5 && sum8 && call5 && via_ptr && usev && mix6 && usev2 && start_rec);
+
+  long long a5[5] = {1, 2, 3, 4, 5};
+  CHECK(sum5(a5) == 15);
+  CHECK(call5(a5) == 30);     // JIT caller builds the block for sum5
+  CHECK(usev(a5) == 2);       // variadic callee reads only its fixed slot
+  CHECK(via_ptr(a5) == 15);   // indirect block call through a function pointer
+
+  long long a8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  CHECK(sum8(a8) == 36);
+
+  // start_rec is a 4-parameter native function; it forward-references and
+  // recurses into the 5-parameter block-ABI recsum.
+  CHECK(start_rec(10, 20, 30, 40) == 112);
+
+  // Mixed integer/double arguments follow declaration order.
+  union { double d; long long w; } b, d, f;
+  b.d = 2.5; d.d = 4.5; f.d = 6.5;
+  long long m6[6] = {1, b.w, 3, d.w, 5, f.w};
+  double r = mix6(m6);
+  CHECK(r > 22.49 && r < 22.51);
+
+  // A variadic callee is block ABI even when called with fewer than five
+  // arguments; the caller here is a plain three-parameter native function.
+  CHECK(usev2(7, 8, 9) == 8);
+}
+
+// va_list on the Block ABI: a variadic callee receives a flat array of
+// 8-byte slots, and __builtin_va_arg walks it. va_list is a one-element
+// array holding the cursor (see __builtin_va_list in the runtime).
+static void test_va_list(JIT *jit) {
+  CHECK_COMPILE(jit, "valist.c",
+    "typedef __builtin_va_list va_list;\n"
+    "#define va_start(ap, last) __builtin_va_start(ap, last)\n"
+    "#define va_arg(ap, ty) __builtin_va_arg(ap, ty)\n"
+    "#define va_end(ap) __builtin_va_end(ap)\n"
+    "#define va_copy(dst, src) __builtin_va_copy(dst, src)\n"
+    "int vsum(int n, ...) {\n"
+    "  va_list ap; va_start(ap, n);\n"
+    "  int s = 0;\n"
+    "  for (int i = 0; i < n; i++) s += va_arg(ap, int);\n"
+    "  va_end(ap);\n"
+    "  return s;\n"
+    "}\n"
+    "double vmix(int n, ...) {\n"
+    "  va_list ap; va_start(ap, n);\n"
+    "  double s = 0;\n"
+    "  for (int i = 0; i < n; i++) s += va_arg(ap, double);\n"
+    "  va_end(ap);\n"
+    "  return s;\n"
+    "}\n"
+    "int vmixed(int n, ...) {\n"
+    "  va_list ap; va_start(ap, n);\n"
+    "  int a = va_arg(ap, int);\n"
+    "  double b = va_arg(ap, double);\n"
+    "  char *s = va_arg(ap, char *);\n"
+    "  va_end(ap);\n"
+    "  return a + (int)b + (int)s[0];\n"
+    "}\n"
+    "int vcopy(int n, ...) {\n"
+    "  va_list ap; va_start(ap, n);\n"
+    "  va_list aq; va_copy(aq, ap);\n"
+    "  int a = va_arg(ap, int);\n"
+    "  int b = va_arg(aq, int);\n"
+    "  return a == b ? a : -1;\n"
+    "}\n"
+    "int vhead2(int a, int b, ...) {\n"
+    "  va_list ap; va_start(ap, b);\n"
+    "  return a + b + va_arg(ap, int);\n"
+    "}\n"
+    "int driver(void) {\n"
+    "  return vsum(4, 10, 20, 30, 40) + vmixed(3, 5, 2.5, \"A\")\n"
+    "       + vcopy(1, 7) + vhead2(1, 2, 3) + (int)vmix(2, 1.5, 2.5);\n"
+    "}\n");
+
+  // 100 + (5 + 2 + 'A') + 7 + (1 + 2 + 3) + 4 = 189
+  int (*driver)(void) = widcc_rt_lookup(jit->rt, "driver");
+  CHECK(driver != NULL);
+  CHECK(driver() == 189);
+
+  // A host caller fills the block for a variadic entry point just like for
+  // any other Block ABI function.
+  int (*vsum)(void *) = widcc_rt_lookup(jit->rt, "vsum");
+  CHECK(vsum != NULL);
+  long long vs[5] = {3, 100, 200, 300}; // slot 3 is unused by vsum(3, ...)
+  CHECK(vsum(vs) == 600);
+
+  // float arguments are promoted to double by the frontend, and
+  // va_arg(ap, float) converts the stored double back.
+  CHECK_COMPILE(jit, "vafloat.c",
+    "typedef __builtin_va_list va_list;\n"
+    "#define va_start(ap, last) __builtin_va_start(ap, last)\n"
+    "#define va_arg(ap, ty) __builtin_va_arg(ap, ty)\n"
+    "float vf(int n, ...) {\n"
+    "  va_list ap; va_start(ap, n);\n"
+    "  return va_arg(ap, float) + va_arg(ap, float);\n"
+    "}\n"
+    "float calld(void) { return vf(2, 1.25f, 2.25f); }\n");
+  float (*calld)(void) = widcc_rt_lookup(jit->rt, "calld");
+  CHECK(calld != NULL);
+  CHECK(calld() > 3.49f && calld() < 3.51f);
+}
+
 int main(void) {
   WidccRT *rt = widcc_rt_new();
   CHECK(rt != NULL);
@@ -966,6 +1111,8 @@ int main(void) {
   test_int64_semantics(&jit);
   test_data_model(&jit);
   test_platform_macros(&jit);
+  test_many_args(&jit);
+  test_va_list(&jit);
 
   test_runtime_release();
 

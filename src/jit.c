@@ -19,18 +19,11 @@
 // Runtime heap helpers
 // ------------------------------------------------------------------
 
-// va_list layout injected into every TU.
-#ifdef _WIN64
+// va_list layout injected into every TU. The JIT uses its own Block ABI for
+// variadic functions (a flat array of 8-byte argument slots), so va_list is
+// just a cursor into that block: element 0 holds the address of the next
+// slot. This is host-independent and needs no prologue register spilling.
 static char jit_builtins[] = "typedef char *__builtin_va_list[1];";
-#else
-static char jit_builtins[] =
-  "typedef struct {"
-  "  unsigned int gp_offset;"
-  "  unsigned int fp_offset;"
-  "  void *overflow_arg_area;"
-  "  void *reg_save_area;"
-  "} __builtin_va_list[1];";
-#endif
 
 static void jit_undefined_fn(void) {
   fprintf(stderr, "widcc-jit: call to an unresolved function\n");
