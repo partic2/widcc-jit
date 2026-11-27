@@ -615,6 +615,7 @@ static Type *func_params_old_style(Token **rest, Token *tok, Type *fn_ty) {
         ty = pointer_to(ty);
 
       Obj *var = new_lvar(get_ident(name), ty);
+      var->is_param = true;
       if (promoted) {
         var->param_promoted = promoted;
         chain_expr(&expr, new_binary(ND_ASSIGN, new_var_node(var, tok),
@@ -696,6 +697,7 @@ static Type *func_params(Token **rest, Token *tok, Type *ty) {
     }
     char *var_name = name ? get_ident(name) : NULL;
     cur = cur->param_next = new_lvar(var_name, ty2);
+    cur->is_param = true;
   }
   leave_scope();
   add_type(expr);

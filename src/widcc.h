@@ -197,6 +197,9 @@ struct Obj {
   // Declared with the `register` storage class: the JIT allocates it a
   // machine register before any other local.
   bool is_register;
+  // Function parameter: the JIT keeps it in its frame slot instead of tying up
+  // a saved register for the whole function.
+  bool is_param;
   Obj *param_next;
   Obj *param_promoted;
   Obj *vla_next;

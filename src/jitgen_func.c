@@ -348,7 +348,8 @@ static void count_uses_expr(Node *n, VarUse *tab, int nv, int w) {
 
 static int collect_int_candidates(Scope *sc, VarUse *tab, int n, int cap) {
   for (Obj *v = sc->locals; v; v = v->next) {
-    if (v->jreg == 0 && !is_flonum(v->ty) && reg_candidate(v) && n < cap) {
+    if (v->jreg == 0 && !v->is_param && !is_flonum(v->ty) && reg_candidate(v) &&
+        n < cap) {
       tab[n].var = v;
       tab[n].uses = 0;
       tab[n].total = 0;
@@ -364,7 +365,7 @@ static int collect_int_candidates(Scope *sc, VarUse *tab, int n, int cap) {
 static int count_int_candidates(Scope *sc) {
   int n = 0;
   for (Obj *v = sc->locals; v; v = v->next)
-    if (v->jreg == 0 && !is_flonum(v->ty) && reg_candidate(v))
+    if (v->jreg == 0 && !v->is_param && !is_flonum(v->ty) && reg_candidate(v))
       n++;
   for (Scope *s = sc->children; s; s = s->sibling_next)
     n += count_int_candidates(s);
@@ -378,7 +379,8 @@ static int lay_out_locals(Scope *sc, int top, JRegAlloc *ra,
   for (int pass = 0; pass < 2; pass++) {
     bool want = pass == 0;
     for (Obj *var = sc->locals; var; var = var->next) {
-      if (var->jreg > 0 || var->is_register != want || !reg_candidate(var))
+      if (var->jreg > 0 || var->is_param || var->is_register != want ||
+          !reg_candidate(var))
         continue;
       bool flt = is_flonum(var->ty);
       int n = alloc_bit(flt ? &ra->used_flt : &ra->used_int,
@@ -442,48 +444,33 @@ static void emit_function_body(JGen *g, Type *fty, sljit_s32 at,
 
   if (g->block_abi) {
     // Block ABI: the incoming arguments are a pointer to the caller-built
-    // argument block (S0) and the total argument count (S1). Copy the block
-    // pointer to scratch R0 first so a parameter assigned to S0 cannot
-    // clobber the base; scratch and saved register ranges are disjoint, so
-    // R0/R1 stay valid throughout.
+    // argument block (S0) and the total argument count (S1). The block pointer
+    // is moved to scratch R0 because the saved registers are free for locals;
+    // scratch and saved ranges are disjoint, so R0/R1 stay valid throughout.
     JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0));
     // Variadic functions need the block base later for va_start, after the
     // body has clobbered R0.
     if (g->va_block_ofs >= 0)
       JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP),
                            g->va_block_ofs, SLJIT_R0, 0));
+    // Copy each argument into its frame slot. sljit has no memory-to-memory
+    // move, so the copy goes through a scratch register: a float is 4 bytes
+    // (raw copy through an integer register) while a double is 8 bytes and,
+    // since a word move is only 4 bytes on a 32-bit host, uses a float scratch.
     int slot = 0;
     for (Obj *p = fty->param_list; p; p = p->param_next, slot++) {
       Type *t = p->ty;
       sljit_sw off = (sljit_sw)slot * 8;
-      if (is_flonum(t)) {
-        sljit_s32 op = t->kind == TY_FLOAT ? SLJIT_MOV_F32 : SLJIT_MOV_F64;
-        if (p->jreg > 0) {
-          JE(g, sljit_emit_fop1(g->C, op, SLJIT_FS(p->jreg - 1), 0,
-                                SLJIT_MEM1(SLJIT_R0), off));
-        } else {
-          // Frame-bound float: a float is 4 bytes (raw copy through an
-          // integer register); a double is 8 bytes and, since a word move
-          // is only 4 bytes on a 32-bit host, goes through a float scratch.
-          if (t->kind == TY_FLOAT) {
-            JE(g, sljit_emit_op1(g->C, SLJIT_MOV32, SLJIT_R1, 0,
-                                 SLJIT_MEM1(SLJIT_R0), off));
-            JE(g, sljit_emit_op1(g->C, SLJIT_MOV32, SLJIT_MEM1(SLJIT_SP),
-                                 p->ofs, SLJIT_R1, 0));
-          } else {
-            JE(g, sljit_emit_fop1(g->C, SLJIT_MOV_F64, SLJIT_FR0, 0,
-                                  SLJIT_MEM1(SLJIT_R0), off));
-            JE(g, sljit_emit_fop1(g->C, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP),
-                                  p->ofs, SLJIT_FR0, 0));
-          }
-        }
-      } else if (p->jreg > 0) {
-        JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_S(p->jreg - 1), 0,
+      if (t->kind == TY_FLOAT) {
+        JE(g, sljit_emit_op1(g->C, SLJIT_MOV32, SLJIT_R1, 0,
                              SLJIT_MEM1(SLJIT_R0), off));
-        // Re-extend so every SValue is canonical for its type.
-        if (t->size < 8)
-          JE(g, sljit_emit_op1(g->C, int_load_op(t), SLJIT_S(p->jreg - 1), 0,
-                               SLJIT_S(p->jreg - 1), 0));
+        JE(g, sljit_emit_op1(g->C, SLJIT_MOV32, SLJIT_MEM1(SLJIT_SP),
+                             p->ofs, SLJIT_R1, 0));
+      } else if (t->kind == TY_DOUBLE) {
+        JE(g, sljit_emit_fop1(g->C, SLJIT_MOV_F64, SLJIT_FR0, 0,
+                              SLJIT_MEM1(SLJIT_R0), off));
+        JE(g, sljit_emit_fop1(g->C, SLJIT_MOV_F64, SLJIT_MEM1(SLJIT_SP),
+                              p->ofs, SLJIT_FR0, 0));
       } else {
         JE(g, sljit_emit_op1(g->C, int_load_op(t), SLJIT_R1, 0,
                              SLJIT_MEM1(SLJIT_R0), off));
@@ -492,32 +479,18 @@ static void emit_function_body(JGen *g, Type *fty, sljit_s32 at,
       }
     }
   } else {
-    // Move incoming parameters from the arrival registers S(ii)/FR(fi) into
-    // their saved register or local slot.
+    // Spill the arrival registers S(ii)/FR(fi) into the frame slots; the local
+    // allocator then owns every saved register.
     int ii = 0, fi = 0;
     for (Obj *p = fty->param_list; p; p = p->param_next) {
       Type *t = p->ty;
       if (is_flonum(t)) {
         sljit_s32 op = t->kind == TY_FLOAT ? SLJIT_MOV_F32 : SLJIT_MOV_F64;
-        if (p->jreg > 0)
-          JE(g, sljit_emit_fop1(g->C, op, SLJIT_FS(p->jreg - 1), 0, SLJIT_FR(fi), 0));
-        else
-          JE(g, sljit_emit_fop1(g->C, op, SLJIT_MEM1(SLJIT_SP), p->ofs, SLJIT_FR(fi), 0));
+        JE(g, sljit_emit_fop1(g->C, op, SLJIT_MEM1(SLJIT_SP), p->ofs, SLJIT_FR(fi), 0));
         fi++;
       } else {
-        if (p->jreg > 0) {
-          if (p->jreg - 1 != ii)
-            JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_S(p->jreg - 1), 0,
-                                 SLJIT_S(ii), 0));
-          // The ABI leaves the high bits of word-size arguments unspecified;
-          // re-extend so every SValue is canonical for its type.
-          if (t->size < 8)
-            JE(g, sljit_emit_op1(g->C, int_load_op(t), SLJIT_S(p->jreg - 1), 0,
-                                 SLJIT_S(p->jreg - 1), 0));
-        } else {
-          JE(g, sljit_emit_op1(g->C, int_store_op(t),
-                               SLJIT_MEM1(SLJIT_SP), p->ofs, SLJIT_S(ii), 0));
-        }
+        JE(g, sljit_emit_op1(g->C, int_store_op(t),
+                             SLJIT_MEM1(SLJIT_SP), p->ofs, SLJIT_S(ii), 0));
         ii++;
       }
     }
@@ -604,38 +577,15 @@ static void compile_function(JTU *tu, Obj *fn) {
   g.block_abi = block_abi;
   mark_stmt_addrs(fn->body);
 
-  // --- First pass: pin parameters to their arrival registers --------------
-  // sljit delivers integer parameters in the first nint saved registers and
-  // float parameters in the first nflt float saved registers, so keeping a
-  // parameter there costs no entry move. Measured on the quicksort benchmark,
-  // pinning beats ranking params like ordinary locals (fewer cycles despite
-  // slightly more instructions). The Block ABI has no per-parameter arrival
-  // registers, so its parameters are laid out like ordinary locals instead.
+  // --- Parameters stay in the frame ---------------------------------------
+  // sljit delivers parameters in the first nint/nflt saved registers, but
+  // those registers are the scarcest resource in the function: one held by a
+  // parameter for its whole live range is one a hot loop local cannot use.
+  // Parameters are therefore spilled to their frame slots in the prologue
+  // (see emit_function_body) and the saved registers are left to the local
+  // allocator. The budget below still reserves nint/nflt of them so the
+  // incoming arguments have somewhere to land.
   JRegAlloc ra = {0};
-  if (!block_abi) {
-    int ii = 0;
-    for (Obj *p = fty->param_list; p; p = p->param_next) {
-      if (is_flonum(p->ty))
-        continue;
-      if (reg_candidate(p)) {
-        p->jreg = ii + 1;
-        ra.used_int |= 1u << ii;
-        ra.max_int = MAX(ra.max_int, ii + 1);
-      }
-      ii++;
-    }
-    int fi = 0;
-    for (Obj *p = fty->param_list; p; p = p->param_next) {
-      if (is_flonum(p->ty)) {
-        if (reg_candidate(p)) {
-          p->jreg = fi + 1;
-          ra.used_flt |= 1u << fi;
-          ra.max_flt = MAX(ra.max_flt, fi + 1);
-        }
-        fi++;
-      }
-    }
-  }
 
   // --- Lay out locals into as many saved registers as allowed --------------
   // Locals are placed before the final budget is known; the saved set then
@@ -666,8 +616,8 @@ static void compile_function(JTU *tu, Obj *fn) {
       }
       for (int i = 0; i < n; i++) {
         Obj *v = vu[i].var;
-        if (v->jreg)
-          continue; // parameter: stays in its arrival register
+        if (v->jreg || v->is_param)
+          continue; // parameters keep their frame slot
         int b = alloc_bit(&ra.used_int, local_budget);
         if (b < 0)
           break;
@@ -681,13 +631,15 @@ static void compile_function(JTU *tu, Obj *fn) {
 
   // --- Decide the per-function register budget ----------------------------
   {
-    // Block ABI parameters are not pinned to arrival registers, so only the
-    // allocator's demand (ra.max_int) sizes the saved integer set.
+    // Parameters are spilled to their frame slots in the prologue, but they
+    // still arrive in the first nint/nflt saved registers, so that many must
+    // stay in the ABI.
     int need_saved_int = block_abi ? ra.max_int : MAX(nint, ra.max_int);
+    int need_saved_flt = block_abi ? ra.max_flt : MAX(nflt, ra.max_flt);
     g.saved_int = MIN(need_saved_int, SLJIT_NUMBER_OF_SAVED_REGISTERS);
     g.saved_int = MAX(g.saved_int, 2); // always at least one scratch pair
     g.saved_int = MIN(g.saved_int, SLJIT_NUMBER_OF_REGISTERS - 4);
-    g.saved_flt = MIN(ra.max_flt, SLJIT_NUMBER_OF_SAVED_FLOAT_REGISTERS);
+    g.saved_flt = MIN(need_saved_flt, SLJIT_NUMBER_OF_SAVED_FLOAT_REGISTERS);
   }
 
   g.eval_base = align_to(lsz, 8);
