@@ -1,6 +1,8 @@
 #ifndef WIDCC_JITGEN_STMT_C
 #define WIDCC_JITGEN_STMT_C
 
+#include "jitgen_emit.c"
+
 // Statement code generation: loops, labels, jumps and the statement
 // dispatcher. Included by jitgen.c.
 //

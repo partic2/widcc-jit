@@ -15,5 +15,17 @@
 #include "tokenize.c"
 #include "preprocess.c"
 #include "parse.c"
+
+
+//jitgen.c
 #include "jitgen.c"
+#include "jitgen_emit.c"
+#include "jitgen_expr.c"
+#include "jitgen_stmt.c"
+#include "jitgen_func.c"
+#undef WIDCC_HOST_64BIT
+#undef JE
+#undef REAL_INT_REGS
+#undef SREG_ADDR_OK
+
 #include "jit.c"

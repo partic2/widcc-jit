@@ -1,6 +1,7 @@
 #ifndef WIDCC_JITGEN_EXPR_C
 #define WIDCC_JITGEN_EXPR_C
 
+#include "jitgen_emit.c"
 // Expression code generation: constant folding, scaled addressing, the
 // va_list forms on the Block ABI, and the gen_expr dispatcher. Included by
 // jitgen.c.

@@ -1249,17 +1249,7 @@ static void emit_divmod(JGen *g, Node *node, Type *ty, bool is32) {
 }
 
 
-// The rest of the backend is split across the files below to keep each one
-// readable. They are included here, in order, so the backend remains a single
-// translation unit (see all.c): every symbol stays static and the include
-// order is exactly the original single-file layout.
-#include "jitgen_emit.c"
-#include "jitgen_expr.c"
-#include "jitgen_stmt.c"
-#include "jitgen_func.c"
 
-#undef WIDCC_HOST_64BIT
-#undef JE
-#undef REAL_INT_REGS
-#undef SREG_ADDR_OK
+
+
 #endif // WIDCC_JITGEN_C

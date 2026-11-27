@@ -1,6 +1,8 @@
 #ifndef WIDCC_JITGEN_FUNC_C
 #define WIDCC_JITGEN_FUNC_C
 
+#include "jitgen_emit.c"
+
 // Function compilation: evaluation-stack depth prescan, saved-register
 // allocation, frame layout, prologue/parameter moves, per-function code
 // generation, and the translation-unit driver. Included by jitgen.c.

@@ -1,6 +1,8 @@
 #ifndef WIDCC_JITGEN_EMIT_C
 #define WIDCC_JITGEN_EMIT_C
 
+#include "jitgen.c"
+
 // Low-level emitters: 64-bit integer emulation on a 32-bit host,
 // condition/logical branching, and the call ABI (native registers and the
 // Block ABI). Included by jitgen.c after the value-stack helpers and before
