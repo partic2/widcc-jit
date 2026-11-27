@@ -252,7 +252,8 @@ static void mark_stmt_addrs(Node *node) {
 
 // --- Use-weighted local allocation --------------------------------------
 // Saved registers are scarce, so they go to the locals that are read and
-// written most often rather than to the first ones declared.
+// written most often rather than to the first ones declared. Locals declared
+// `register` outrank all of them.
 
 typedef struct {
   Obj *var;
@@ -372,14 +373,14 @@ static int count_int_candidates(Scope *sc) {
 
 static int lay_out_locals(Scope *sc, int top, JRegAlloc *ra,
                           int int_budget, int flt_budget) {
-  for (Obj *var = sc->locals; var; var = var->next) {
-    if (var->jreg > 0)
-      continue;
-    Type *ty = var->ty;
-    if (ty->kind == TY_VLA || ty->size < 0)
-      error("jitgen: variable-length arrays are not supported");
-    if (reg_candidate(var)) {
-      bool flt = is_flonum(ty);
+  // `register` locals take a saved register before ordinary ones; inside each
+  // pass the order is unchanged.
+  for (int pass = 0; pass < 2; pass++) {
+    bool want = pass == 0;
+    for (Obj *var = sc->locals; var; var = var->next) {
+      if (var->jreg > 0 || var->is_register != want || !reg_candidate(var))
+        continue;
+      bool flt = is_flonum(var->ty);
       int n = alloc_bit(flt ? &ra->used_flt : &ra->used_int,
                         flt ? flt_budget : int_budget);
       if (n >= 0) {
@@ -388,9 +389,16 @@ static int lay_out_locals(Scope *sc, int top, JRegAlloc *ra,
           ra->max_flt = MAX(ra->max_flt, n + 1);
         else
           ra->max_int = MAX(ra->max_int, n + 1);
-        continue;
       }
     }
+  }
+
+  for (Obj *var = sc->locals; var; var = var->next) {
+    if (var->jreg > 0)
+      continue;
+    Type *ty = var->ty;
+    if (ty->kind == TY_VLA || ty->size < 0)
+      error("jitgen: variable-length arrays are not supported");
     int align = (ty->kind == TY_ARRAY && ty->size >= 16)
       ? MAX(16, ty->align) : ty->align;
     if (align > 16)
@@ -433,10 +441,11 @@ static void emit_function_body(JGen *g, Type *fty, sljit_s32 at,
                          local_size));
 
   if (g->block_abi) {
-    // Block ABI: the sole incoming argument is a pointer to the caller-built
-    // argument block, delivered in S0. Copy it to scratch R0 first so a
-    // parameter assigned to S0 cannot clobber the base; scratch and saved
-    // register ranges are disjoint, so R0/R1 stay valid throughout.
+    // Block ABI: the incoming arguments are a pointer to the caller-built
+    // argument block (S0) and the total argument count (S1). Copy the block
+    // pointer to scratch R0 first so a parameter assigned to S0 cannot
+    // clobber the base; scratch and saved register ranges are disjoint, so
+    // R0/R1 stay valid throughout.
     JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S0, 0));
     // Variadic functions need the block base later for va_start, after the
     // body has clobbered R0.
@@ -570,8 +579,8 @@ static void compile_function(JTU *tu, Obj *fn) {
   }
 
   // Variadic functions and those with more than JMAX_ARGS parameters use
-  // the Block ABI: the native entry takes only a pointer to an argument
-  // block, so sljit never sees more than one argument.
+  // the Block ABI: the native entry takes a pointer to an argument block plus
+  // the total argument count, so sljit never sees more than two arguments.
   bool block_abi = fty->is_variadic || narg > JMAX_ARGS;
   if (!block_abi && (nint > JMAX_INT_ARGS || nflt > JMAX_FLT_ARGS))
     error("jitgen: too many parameters: %s", fn->name);
@@ -581,6 +590,7 @@ static void compile_function(JTU *tu, Obj *fn) {
     at = SLJIT_ARG_RETURN(SLJIT_ARG_TYPE_RET_VOID);
   if (block_abi) {
     at |= SLJIT_ARG_VALUE(SLJIT_ARG_TYPE_P, 1);
+    at |= SLJIT_ARG_VALUE(SLJIT_ARG_TYPE_W, 2);
   } else {
     int pos = 0;
     for (Obj *p = fty->param_list; p; p = p->param_next)
@@ -637,13 +647,18 @@ static void compile_function(JTU *tu, Obj *fn) {
       VarUse *vu = cc_calloc(ncand, sizeof(VarUse));
       int n = collect_int_candidates(fty->scopes, vu, 0, ncand);
       count_uses_stmt(fn->body, vu, n, 1);
+      // `register` locals come first; everything else keeps the use-weighted
+      // order.
       for (int i = 1; i < n; i++) {
         VarUse key = vu[i];
         int j = i - 1;
-        while (j >= 0 && (vu[j].uses < key.uses ||
-                          (vu[j].uses == key.uses && vu[j].total > key.total) ||
-                          (vu[j].uses == key.uses && vu[j].total == key.total &&
-                           vu[j].order > key.order))) {
+        while (j >= 0 &&
+               (vu[j].var->is_register < key.var->is_register ||
+                (vu[j].var->is_register == key.var->is_register &&
+                 (vu[j].uses < key.uses ||
+                  (vu[j].uses == key.uses && vu[j].total > key.total) ||
+                  (vu[j].uses == key.uses && vu[j].total == key.total &&
+                   vu[j].order > key.order))))) {
           vu[j + 1] = vu[j];
           j--;
         }

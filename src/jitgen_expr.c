@@ -159,9 +159,12 @@ static bool emit_const_muldiv(JGen *g, Node *node, Type *ty, bool is32,
       return true;
     if (k < 1)
       return false;
-    if (ty->is_unsigned) {
-      JE(g, sljit_emit_op2(g->C, SLJIT_LSHR | op32, SLJIT_R(r), 0,
-                           SLJIT_R(r), 0, SLJIT_IMM, k));
+    if (ty->is_unsigned || node->ptr_diff_div) {
+      // An unsigned dividend shifts logically. A pointer difference is exact
+      // by construction, so its signed quotient needs no rounding correction
+      // either: a plain arithmetic shift gives the truncated result.
+      JE(g, sljit_emit_op2(g->C, (ty->is_unsigned ? SLJIT_LSHR : SLJIT_ASHR) | op32,
+                           SLJIT_R(r), 0, SLJIT_R(r), 0, SLJIT_IMM, k));
       return true;
     }
     // Signed division truncates toward zero: add (v < 0 ? c-1 : 0)
@@ -376,9 +379,10 @@ static bool gen_scaled_add(JGen *g, Node *node) {
 // ------------------------------------------------------------------
 // va_list on the Block ABI
 //
-// Variadic functions are compiled with the Block ABI: the entry receives one
-// pointer to a flat array of 8-byte slots, in declaration order. va_list is
-// therefore just a cursor into that array (see __builtin_va_list in jit.c).
+// Variadic functions are compiled with the Block ABI: the entry receives a
+// pointer to a flat array of 8-byte slots, in declaration order, plus the
+// total argument count. va_list is therefore just a cursor into that array
+// (see __builtin_va_list in jit.c).
 // va_start points it at the first slot past the named parameters, and each
 // va_arg reads one slot and advances by the fixed 8-byte stride. There is no
 // register-save area and no gp/fp offset bookkeeping: sljit never has to

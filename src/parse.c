@@ -38,6 +38,7 @@ typedef struct {
   bool is_extern;
   bool is_inline;
   bool is_tls;
+  bool is_register;
 } VarAttr;
 
 // This struct represents a variable initializer. Since initializers
@@ -424,6 +425,15 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
   int counter = 0;
 
   while (is_typename(tok)) {
+    // `register` is a hint for the JIT backend, which allocates those locals a
+    // machine register before any other local. Outside a declaration it is
+    // simply ignored, as before.
+    if (consume(&tok, tok, "register")) {
+      if (attr)
+        attr->is_register = true;
+      continue;
+    }
+
     // Handle storage class specifiers.
     if (equal(tok, "typedef") || equal(tok, "static") || equal(tok, "extern") ||
         equal(tok, "inline") || equal(tok, "_Thread_local") || equal(tok, "__thread")) {
@@ -451,7 +461,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
 
     // These keywords are recognized but ignored.
     if (consume(&tok, tok, "const") || consume(&tok, tok, "volatile") ||
-        consume(&tok, tok, "auto") || consume(&tok, tok, "register") ||
+        consume(&tok, tok, "auto") ||
         consume(&tok, tok, "restrict") || consume(&tok, tok, "__restrict") ||
         consume(&tok, tok, "__restrict__") || consume(&tok, tok, "_Noreturn"))
       continue;
@@ -1013,6 +1023,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     }
 
     Obj *var = new_lvar(get_ident(name), ty);
+    var->is_register = attr && attr->is_register;
     if (equal(tok, "="))
       chain_expr(&expr, lvar_initializer(&tok, tok->next, var));
 
@@ -2637,7 +2648,12 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   if (lhs->ty->base && rhs->ty->base) {
     int sz = lhs->ty->base->size;
     Node *node = new_binary(ND_SUB, new_cast(lhs, ty_ptrdiff_t), new_cast(rhs, ty_ptrdiff_t), tok);
-    return new_binary(ND_DIV, node, new_num(sz, tok), tok);
+    Node *div = new_binary(ND_DIV, node, new_num(sz, tok), tok);
+    // The byte gap is a multiple of the element size, so the quotient is
+    // exact: the backend can use a plain shift instead of a truncating
+    // division sequence.
+    div->ptr_diff_div = true;
+    return div;
   }
 
   error_tok(tok, "invalid operands");

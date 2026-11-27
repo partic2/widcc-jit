@@ -5,6 +5,7 @@
 // variables, host symbol registration (including per-runtime resolvers),
 // repeated loads, per-module unload, includes and virtual file I/O.
 #include "widcc_jit.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -943,9 +944,9 @@ static void test_data_model(JIT *jit) {
 }
 
 // Functions with more than four parameters (and all variadic functions) use
-// the Block ABI: the JIT entry takes a single pointer to an array of 8-byte
-// argument slots, so the host must call such functions through a
-// one-pointer prototype and fill the slots itself.
+// the Block ABI: the JIT entry takes a pointer to an array of 8-byte argument
+// slots plus the total argument count, so the host must call such functions
+// through a two-argument prototype and fill the slots itself.
 static void test_many_args(JIT *jit) {
   CHECK_COMPILE(jit, "manyargs.c",
     "int sum5(int a, int b, int c, int d, int e) { return a+b+c+d+e; }\n"
@@ -974,26 +975,27 @@ static void test_many_args(JIT *jit) {
     "int usev(int a, int b, int c, int d, int e) { return vhead(a,b,c,d,e); }\n"
     "int usev2(int a, int b, int c) { return vhead(a,b,c); }\n");
 
-  // Block ABI entry points: one pointer to an array of 8-byte slots.
-  int (*sum5)(void *) = widcc_rt_lookup(jit->rt, "sum5");
-  int (*sum8)(void *) = widcc_rt_lookup(jit->rt, "sum8");
-  int (*call5)(void *) = widcc_rt_lookup(jit->rt, "call5");
-  int (*via_ptr)(void *) = widcc_rt_lookup(jit->rt, "via_ptr");
-  int (*usev)(void *) = widcc_rt_lookup(jit->rt, "usev");
-  double (*mix6)(void *) = widcc_rt_lookup(jit->rt, "mix6");
+  // Block ABI entry points: one pointer to an array of 8-byte slots, plus the
+  // total argument count as a machine word.
+  int (*sum5)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "sum5");
+  int (*sum8)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "sum8");
+  int (*call5)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "call5");
+  int (*via_ptr)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "via_ptr");
+  int (*usev)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "usev");
+  double (*mix6)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "mix6");
   // Four parameters keep the native ABI, so the host calls these directly.
   int (*usev2)(int, int, int) = widcc_rt_lookup(jit->rt, "usev2");
   int (*start_rec)(int, int, int, int) = widcc_rt_lookup(jit->rt, "start_rec");
   CHECK(sum5 && sum8 && call5 && via_ptr && usev && mix6 && usev2 && start_rec);
 
   long long a5[5] = {1, 2, 3, 4, 5};
-  CHECK(sum5(a5) == 15);
-  CHECK(call5(a5) == 30);     // JIT caller builds the block for sum5
-  CHECK(usev(a5) == 2);       // variadic callee reads only its fixed slot
-  CHECK(via_ptr(a5) == 15);   // indirect block call through a function pointer
+  CHECK(sum5(a5, 5) == 15);
+  CHECK(call5(a5, 5) == 30);    // JIT caller builds the block for sum5
+  CHECK(usev(a5, 5) == 2);      // variadic callee reads only its fixed slot
+  CHECK(via_ptr(a5, 5) == 15);  // indirect block call through a function pointer
 
   long long a8[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-  CHECK(sum8(a8) == 36);
+  CHECK(sum8(a8, 8) == 36);
 
   // start_rec is a 4-parameter native function; it forward-references and
   // recurses into the 5-parameter block-ABI recsum.
@@ -1003,7 +1005,7 @@ static void test_many_args(JIT *jit) {
   union { double d; long long w; } b, d, f;
   b.d = 2.5; d.d = 4.5; f.d = 6.5;
   long long m6[6] = {1, b.w, 3, d.w, 5, f.w};
-  double r = mix6(m6);
+  double r = mix6(m6, 6);
   CHECK(r > 22.49 && r < 22.51);
 
   // A variadic callee is block ABI even when called with fewer than five
@@ -1065,11 +1067,11 @@ static void test_va_list(JIT *jit) {
   CHECK(driver() == 189);
 
   // A host caller fills the block for a variadic entry point just like for
-  // any other Block ABI function.
-  int (*vsum)(void *) = widcc_rt_lookup(jit->rt, "vsum");
+  // any other Block ABI function, passing the total argument count.
+  int (*vsum)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "vsum");
   CHECK(vsum != NULL);
   long long vs[5] = {3, 100, 200, 300}; // slot 3 is unused by vsum(3, ...)
-  CHECK(vsum(vs) == 600);
+  CHECK(vsum(vs, 4) == 600);
 
   // float arguments are promoted to double by the frontend, and
   // va_arg(ap, float) converts the stored double back.

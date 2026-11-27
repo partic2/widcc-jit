@@ -921,8 +921,8 @@ static void gen_funcall(JGen *g, Node *node) {
   sljit_s32 at;
   if (block) {
     // Block ABI: fill the caller-side argument block, then pass its address
-    // in R0 as the sole argument. sljit sees a one-argument function, so its
-    // four-argument limit never applies.
+    // in R0 and the total argument count in R1. sljit sees a two-argument
+    // function, so its four-argument limit never applies.
     if (narg > 0)
       build_arg_block(g, base, narg);
     g->argblock_max = MAX(g->argblock_max, narg * 8);
@@ -930,7 +930,10 @@ static void gen_funcall(JGen *g, Node *node) {
     if (node->ty->kind == TY_VOID)
       at = SLJIT_ARG_RETURN(SLJIT_ARG_TYPE_RET_VOID);
     at |= SLJIT_ARG_VALUE(SLJIT_ARG_TYPE_P, 1);
+    at |= SLJIT_ARG_VALUE(SLJIT_ARG_TYPE_W, 2);
     JE(g, sljit_get_local_base(g->C, SLJIT_R0, 0, g->argblock_base));
+    JE(g, sljit_emit_op1(g->C, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM,
+                         (sljit_sw)narg));
   } else {
     at = SLJIT_ARG_RETURN(arg_type_of(node->ty));
     if (node->ty->kind == TY_VOID)

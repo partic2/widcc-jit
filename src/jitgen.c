@@ -48,8 +48,9 @@ _Static_assert(sizeof(sljit_sw) == sizeof(void *),
 // Hardware ABI we're targeting: up to 4 word + 4 float register arguments,
 // matching x86-64 SysV and MinGW/x64. These limits apply to the native C
 // ABI only; functions with more than JMAX_ARGS parameters (and all variadic
-// functions) use the Block ABI instead, which passes one pointer to an
-// argument block and therefore never exceeds sljit's four-argument limit.
+// functions) use the Block ABI instead, which passes a pointer to an argument
+// block plus the argument count and therefore never exceeds sljit's
+// four-argument limit.
 enum { JMAX_INT_ARGS = 4, JMAX_FLT_ARGS = 4, JMAX_ARGS = 4 };
 
 typedef struct JLoop JLoop;
@@ -176,9 +177,9 @@ typedef struct JGen {
   int m32i64_max;       // peak of m32i64_top over this emission
 
   // Block ABI: functions with more than JMAX_ARGS parameters, and all
-  // variadic functions, are compiled to take a single pointer to an
-  // argument block (see "Block ABI" below). sljit then never sees more
-  // than one argument.
+  // variadic functions, are compiled to take a pointer to an argument block
+  // plus the total argument count (see "Block ABI" below). sljit then never
+  // sees more than two arguments.
   bool block_abi;        // this function uses the block ABI
   int argblock_base;     // caller: local-area offset of its argument block
   int argblock_max;      // caller: peak block size in bytes

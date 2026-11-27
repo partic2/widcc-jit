@@ -70,7 +70,9 @@ call them through the natural prototype. Functions with more than four
 parameters, and all variadic functions, are compiled with the **Block ABI**
 to stay within sljit's four-argument limit:
 
-- The JIT entry takes a single `void *` pointing to an argument block.
+- The JIT entry takes two arguments: a `void *` pointing to an argument
+  block, and a machine-word count of how many arguments the call supplied
+  (named and unnamed alike).
 - The block is an array of 8-byte slots in declaration order. Integer and
   pointer arguments occupy a full slot; a `float` uses 4 bytes and a
   `double` 8 bytes at the start of its slot.
@@ -78,12 +80,13 @@ to stay within sljit's four-argument limit:
   agree on this ABI because it is a property of the function type.
 
 JIT-to-JIT calls need no host involvement. To call such a function from the
-host, use a one-pointer prototype and fill the slots:
+host, use a two-argument prototype and fill the slots:
 
 ```c
-int (*sum5)(void *) = widcc_rt_lookup(rt, "sum5");   // int sum5(int,int,int,int,int)
+// intptr_t is the machine word; slots hold the arguments themselves.
+int (*sum5)(void *, intptr_t) = widcc_rt_lookup(rt, "sum5"); // int sum5(int,int,int,int,int)
 long long args[5] = {1, 2, 3, 4, 5};
-int r = sum5(args);
+int r = sum5(args, 5);
 ```
 
 A function pointer to a block-ABI function must point to JIT code; do not

@@ -194,6 +194,9 @@ struct Obj {
   // escapes via `&`.
   int jreg;
   bool address_taken;
+  // Declared with the `register` storage class: the JIT allocates it a
+  // machine register before any other local.
+  bool is_register;
   Obj *param_next;
   Obj *param_promoted;
   Obj *vla_next;
@@ -349,6 +352,11 @@ struct Node {
   // Numeric literal
   int64_t val;
   long double fval;
+
+  // ND_DIV produced by subtracting two pointers. The dividend is the byte
+  // distance between two elements of one array, so it is always a multiple of
+  // the element size and the division truncates to an exact quotient.
+  bool ptr_diff_div;
 };
 
 // Represents a block scope.
