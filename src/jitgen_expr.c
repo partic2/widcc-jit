@@ -658,10 +658,13 @@ static void gen_expr(JGen *g, Node *node) {
       return;
     }
     bool is_void = node->ty->kind == TY_VOID;
+    // Enclosing values must reach both arms in memory: the spill stores are
+    // executed by the fall-through path only, so they cannot be emitted
+    // after the branch.
+    sv_spill_all(g);
     struct sljit_jump *jels = gen_branch(g, node->cond, false);
     // Both arms deliver their result in the same register, so the join is
     // register-based and needs no memory round trip.
-    sv_spill_all(g);
     gen_expr(g, node->then);
     if (!is_void) {
       sv_to_conv(g, g->vtop - 1, 0);

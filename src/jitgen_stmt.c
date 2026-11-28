@@ -216,7 +216,12 @@ static void gen_stmt_impl(JGen *g, Node *node) {
     // are emitted once at the top to keep code size down.
     bool rotate = node->cond && simple_cond(node->cond);
     struct sljit_jump *jpre = NULL;
+    struct sljit_label *ltop = NULL;
     if (node->cond && !rotate) {
+      // A condition with side effects is emitted once, above the body. The
+      // back edge must re-enter the test, not the body, or the loop would
+      // repeat without ever re-evaluating it.
+      ltop = lchk(sljit_emit_label(g->C));
       struct sljit_jump *j = gen_branch(g, node->cond, false);
       jvec_push(&g->loops[g->nloops - 1].brk,
                 &g->loops[g->nloops - 1].nbrk,
@@ -240,7 +245,7 @@ static void gen_stmt_impl(JGen *g, Node *node) {
       sljit_set_label(j, lbody);
     } else {
       struct sljit_jump *jback = jchk(sljit_emit_jump(g->C, SLJIT_JUMP));
-      sljit_set_label(jback, lbody);
+      sljit_set_label(jback, ltop ? ltop : lbody);
     }
     gen_brk_label(g, node->brk_label);
     g->nloops--;

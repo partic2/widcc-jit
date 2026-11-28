@@ -250,7 +250,7 @@ static void NORETURN unsupported(Node *node, char *what) {
 // On x86-32 only R0..R2 are real registers; R3+ are virtual and cannot
 // serve as a memory base. Values used as addresses must be pulled into a
 // real register.
-#if WIDCC_HOST_64BIT
+#if defined(__i386__)
 #define REAL_INT_REGS(g) ((g)->scratch_int)
 #else
 #define REAL_INT_REGS(g) MIN((g)->scratch_int, 3)
@@ -265,6 +265,7 @@ static void NORETURN unsupported(Node *node, char *what) {
 #else
 #define SREG_ADDR_OK(s) ((s) < 3)
 #endif
+
 
 static bool sv_flt(SValue *v) {
   return is_flonum(v->ty);

@@ -15,6 +15,10 @@
 
 static int expr_depth(Node *node);
 
+// The MAX macro evaluates one operand twice; with recursive calls inside,
+// a long expression tree turns into exponential work. Evaluate once instead.
+static int max_int(int a, int b) { return a < b ? b : a; }
+
 static int addr_depth(Node *node) {
   switch (node->kind) {
   case ND_VAR:
@@ -23,7 +27,7 @@ static int addr_depth(Node *node) {
     return expr_depth(node->lhs);
   case ND_CHAIN:
   case ND_COMMA:
-    return MAX(expr_depth(node->lhs), addr_depth(node->rhs));
+    return max_int(expr_depth(node->lhs), addr_depth(node->rhs));
   case ND_MEMBER:
     return addr_depth(node->lhs);
   default:
@@ -39,7 +43,7 @@ static int stmt_depth(Node *node) {
   case ND_STMT_EXPR: {
     int d = 0;
     for (Node *n = node->body; n; n = n->next)
-      d = MAX(d, stmt_depth(n));
+      d = max_int(d, stmt_depth(n));
     return d;
   }
   case ND_EXPR_STMT:
@@ -47,21 +51,21 @@ static int stmt_depth(Node *node) {
   case ND_RETURN:
     return node->lhs ? expr_depth(node->lhs) : 0;
   case ND_IF:
-    return MAX(expr_depth(node->cond),
-               MAX(stmt_depth(node->then), stmt_depth(node->els)));
+    return max_int(expr_depth(node->cond),
+                   max_int(stmt_depth(node->then), stmt_depth(node->els)));
   case ND_FOR: {
     int d = stmt_depth(node->init);
     if (node->cond)
-      d = MAX(d, expr_depth(node->cond));
-    d = MAX(d, stmt_depth(node->then));
+      d = max_int(d, expr_depth(node->cond));
+    d = max_int(d, stmt_depth(node->then));
     if (node->inc)
-      d = MAX(d, expr_depth(node->inc));
+      d = max_int(d, expr_depth(node->inc));
     return d;
   }
   case ND_DO:
-    return MAX(stmt_depth(node->then), expr_depth(node->cond));
+    return max_int(stmt_depth(node->then), expr_depth(node->cond));
   case ND_SWITCH:
-    return MAX(expr_depth(node->cond), stmt_depth(node->then));
+    return max_int(expr_depth(node->cond), stmt_depth(node->then));
   case ND_CASE:
   case ND_LABEL:
     return stmt_depth(node->lhs);
@@ -93,28 +97,28 @@ static int expr_depth(Node *node) {
   case ND_LOGOR:
   case ND_COMMA:
   case ND_CHAIN:
-    return MAX(expr_depth(node->lhs), expr_depth(node->rhs));
+    return max_int(expr_depth(node->lhs), expr_depth(node->rhs));
   case ND_COND:
-    return MAX(expr_depth(node->cond),
-               MAX(expr_depth(node->then), expr_depth(node->els)));
+    return max_int(expr_depth(node->cond),
+                   max_int(expr_depth(node->then), expr_depth(node->els)));
   case ND_ASSIGN:
     // rhs is evaluated first, then the lhs address is pushed above it.
-    return MAX(expr_depth(node->rhs), 1 + addr_depth(node->lhs));
+    return max_int(expr_depth(node->rhs), 1 + addr_depth(node->lhs));
   case ND_STMT_EXPR: {
     int d = 0;
     Node *last = NULL;
     for (Node *n = node->body; n; n = n->next)
       last = n;
     for (Node *n = node->body; n; n = n->next)
-      d = MAX(d, (n == last && n->kind == ND_EXPR_STMT)
-                   ? expr_depth(n->lhs) : stmt_depth(n));
+      d = max_int(d, (n == last && n->kind == ND_EXPR_STMT)
+                        ? expr_depth(n->lhs) : stmt_depth(n));
     return d;
   }
   case ND_FUNCALL: {
     int d = expr_depth(node->lhs); // callee, then pushed
     int n = 1;
     for (Obj *a = node->args; a; a = a->param_next) {
-      d = MAX(d, n + expr_depth(a->arg_expr));
+      d = max_int(d, n + expr_depth(a->arg_expr));
       n++;
     }
     return d;
@@ -125,7 +129,7 @@ static int expr_depth(Node *node) {
   // ND_ADD..ND_GE are contiguous: binary ops and comparisons, which
   // evaluate lhs, push it, then evaluate rhs.
   if (node->kind >= ND_ADD && node->kind <= ND_GE)
-    return MAX(expr_depth(node->lhs), 1 + expr_depth(node->rhs));
+    return max_int(expr_depth(node->lhs), 1 + expr_depth(node->rhs));
   return 0; // unsupported kinds are rejected during codegen
 }
 
@@ -414,8 +418,8 @@ static int lay_out_locals(Scope *sc, int top, JRegAlloc *ra,
 
   int max_top = top;
   for (Scope *sub = sc->children; sub; sub = sub->sibling_next)
-    max_top = MAX(max_top, lay_out_locals(sub, top, ra,
-                                          int_budget, flt_budget));
+    max_top = max_int(max_top, lay_out_locals(sub, top, ra,
+                                              int_budget, flt_budget));
   return max_top;
 }
 
@@ -481,15 +485,30 @@ static void emit_function_body(JGen *g, Type *fty, sljit_s32 at,
       }
     }
   } else {
-    // Spill the arrival registers S(ii)/FR(fi) into the frame slots; the local
-    // allocator then owns every saved register.
+    // Parameters either stay in their arrival register or are read from their
+    // frame slot. Float arguments arrive in the scratch float registers
+    // FR(fi), which are caller-saved, so a float parameter only survives a
+    // call once it is either copied into a saved float register or stored to
+    // its slot. Integer arguments arrive in S(ii); the ABI leaves the high
+    // bits of sub-word ones unspecified, so those are re-extended to keep
+    // every SValue canonical for its type.
     int ii = 0, fi = 0;
     for (Obj *p = fty->param_list; p; p = p->param_next) {
       Type *t = p->ty;
       if (is_flonum(t)) {
         sljit_s32 op = t->kind == TY_FLOAT ? SLJIT_MOV_F32 : SLJIT_MOV_F64;
-        JE(g, sljit_emit_fop1(g->C, op, SLJIT_MEM1(SLJIT_SP), p->ofs, SLJIT_FR(fi), 0));
+        if (p->jreg > 0)
+          JE(g, sljit_emit_fop1(g->C, op, SLJIT_FS(p->jreg - 1), 0,
+                                SLJIT_FR(fi), 0));
+        else
+          JE(g, sljit_emit_fop1(g->C, op, SLJIT_MEM1(SLJIT_SP), p->ofs,
+                                SLJIT_FR(fi), 0));
         fi++;
+      } else if (p->jreg > 0) {
+        if (t->size < 8)
+          JE(g, sljit_emit_op1(g->C, int_load_op(t), SLJIT_S(p->jreg - 1), 0,
+                               SLJIT_S(p->jreg - 1), 0));
+        ii++;
       } else {
         JE(g, sljit_emit_op1(g->C, int_store_op(t),
                              SLJIT_MEM1(SLJIT_SP), p->ofs, SLJIT_S(ii), 0));
@@ -579,22 +598,43 @@ static void compile_function(JTU *tu, Obj *fn) {
   g.block_abi = block_abi;
   mark_stmt_addrs(fn->body);
 
-  // --- Parameters stay in the frame ---------------------------------------
-  // sljit delivers parameters in the first nint/nflt saved registers, but
-  // those registers are the scarcest resource in the function: one held by a
-  // parameter for its whole live range is one a hot loop local cannot use.
-  // Parameters are therefore spilled to their frame slots in the prologue
-  // (see emit_function_body) and the saved registers are left to the local
-  // allocator. The budget below still reserves nint/nflt of them so the
-  // incoming arguments have somewhere to land.
+  // --- Parameters: arrival registers unless the locals need them ----------
+  // sljit delivers integer parameters in the first nint saved registers, and
+  // keeping them there is free. Only when the function declares more register
+  // candidates than the whole saved set (x86-64: 6, x86-32: 7) do the
+  // parameters move to their frame slots, so the locals can use all of it.
+  // Float parameters are pinned only when the host actually has saved float
+  // registers (x86 has none), otherwise they are stored to their slots.
   JRegAlloc ra = {0};
+  int ncand = count_int_candidates(fty->scopes);
+  bool pin_int = !block_abi && ncand <= SLJIT_NUMBER_OF_SAVED_REGISTERS;
+  bool pin_flt = !block_abi && nflt <= SLJIT_NUMBER_OF_SAVED_FLOAT_REGISTERS;
+  {
+    int ii = 0, fi = 0;
+    for (Obj *p = fty->param_list; p; p = p->param_next) {
+      if (is_flonum(p->ty)) {
+        if (pin_flt && reg_candidate(p)) {
+          p->jreg = fi + 1;
+          ra.used_flt |= 1u << fi;
+          ra.max_flt = MAX(ra.max_flt, fi + 1);
+        }
+        fi++;
+      } else {
+        if (pin_int && reg_candidate(p)) {
+          p->jreg = ii + 1;
+          ra.used_int |= 1u << ii;
+          ra.max_int = MAX(ra.max_int, ii + 1);
+        }
+        ii++;
+      }
+    }
+  }
 
   // --- Lay out locals into as many saved registers as allowed --------------
   // Locals are placed before the final budget is known; the saved set then
   // grows to hold them.
   int local_budget = SLJIT_NUMBER_OF_SAVED_REGISTERS;
   {
-    int ncand = count_int_candidates(fty->scopes);
     if (ncand > 0) {
       VarUse *vu = cc_calloc(ncand, sizeof(VarUse));
       int n = collect_int_candidates(fty->scopes, vu, 0, ncand);
@@ -619,7 +659,7 @@ static void compile_function(JTU *tu, Obj *fn) {
       for (int i = 0; i < n; i++) {
         Obj *v = vu[i].var;
         if (v->jreg || v->is_param)
-          continue; // parameters keep their frame slot
+          continue; // pinned above, or spilled to the frame
         int b = alloc_bit(&ra.used_int, local_budget);
         if (b < 0)
           break;
@@ -810,14 +850,17 @@ static void *resolve_reloc_target(JTU *tu, Obj *prog, char *name, Obj **target_o
   return NULL;
 }
 
-static void emit_data(JTU *tu, Obj *prog) {
+// Pass 1 of data emission: give every object of this TU its backing block.
+// Initializers are filled in a second pass, so a static initializer may
+// reference any global of the same unit regardless of source order.
+static void emit_data_alloc(JTU *tu, Obj *prog) {
   for (Obj *var = prog; var; var = var->next) {
     if (!var->is_definition)
       continue;
 
     if (var->ty->kind == TY_FUNC) {
       if (var->is_live)
-        emit_data(tu, var->static_lvars);
+        emit_data_alloc(tu, var->static_lvars);
       continue;
     }
 
@@ -859,9 +902,28 @@ static void emit_data(JTU *tu, Obj *prog) {
       }
     }
     var->jit_addr = buf;
+  }
+}
 
-    if (var->init_data)
-      memcpy(buf, var->init_data, sz);
+// Pass 2: copy initializers and apply their relocations now that every
+// object of the unit has an address.
+static void emit_data_fill(JTU *tu, Obj *prog) {
+  for (Obj *var = prog; var; var = var->next) {
+    if (!var->is_definition)
+      continue;
+
+    if (var->ty->kind == TY_FUNC) {
+      if (var->is_live)
+        emit_data_fill(tu, var->static_lvars);
+      continue;
+    }
+
+    char *buf = var->jit_addr;
+    if (var->init_data) {
+      int64_t sz = var->ty->size;
+      if (sz > 0)
+        memcpy(buf, var->init_data, sz);
+    }
 
     for (Relocation *rel = var->rel; rel; rel = rel->next) {
       char *name = *rel->label;
@@ -886,6 +948,11 @@ static void emit_data(JTU *tu, Obj *prog) {
       memcpy(buf + rel->offset, &val, sizeof(val));
     }
   }
+}
+
+static void emit_data(JTU *tu, Obj *prog) {
+  emit_data_alloc(tu, prog);
+  emit_data_fill(tu, prog);
 }
 
 //

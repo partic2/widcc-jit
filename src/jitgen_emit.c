@@ -568,10 +568,12 @@ static struct sljit_jump *gen_branch(JGen *g, Node *cond, bool jump_on_true) {
 
 // i64 ? : with both branches yielding 64-bit values.
 static void gen_m32i64_cond(JGen *g, Node *node) {
+  // Spill before the branch: the stores below only run on the fall-through
+  // path, so both arms must already see enclosing values in memory.
+  sv_spill_all(g);
   gen_cond_truth(g, node->cond);
   struct sljit_jump *jels = jchk(sljit_emit_cmp(g->C, SLJIT_EQUAL,
                                                    SLJIT_R0, 0, SLJIT_IMM, 0));
-  sv_spill_all(g);
   int ofs = m32i64_alloc_temp(g);        // shared result slot
   int branch_mark = g->m32i64_top;
 

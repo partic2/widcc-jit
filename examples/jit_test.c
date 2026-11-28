@@ -4,6 +4,14 @@
 // across translation units, structs, arrays, pointers, strings, global
 // variables, host symbol registration (including per-runtime resolvers),
 // repeated loads, per-module unload, includes and virtual file I/O.
+//
+// The "broader language coverage" groups at the end add operator side
+// effects, integer conversions, aggregates and static initializers with
+// cross-object addresses, indirect calls in both directions, statement-level
+// control flow, the preprocessor, loop conditions with side effects,
+// ternaries nested in larger expressions, wide expression trees, spill-heavy
+// frames, the float calling convention and the diagnostics of rejected
+// constructs.
 #include "widcc_jit.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -234,20 +242,26 @@ static void test_float(JIT *jit) {
     "float fmul(float a, float b) { return a * b; }\n"
     "double mix(int i, double d, float f) { return i + d + f; }\n"
     "int dcmp(double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); }\n"
-    "double ddiv(double a, double b) { return a / b; }\n");
+    "double ddiv(double a, double b) { return a / b; }\n"
+    // Float arguments arrive in caller-saved registers, so a float parameter
+    // must survive an ordinary call issued from inside the function.
+    "double keepf(double d, float f) { double r = dadd(1.0, 1.0);"
+    " return d + f + r; }\n");
 
   double (*dadd)(double, double) = widcc_rt_lookup(jit->rt, "dadd");
   float (*fmul)(float, float) = widcc_rt_lookup(jit->rt, "fmul");
   double (*mix)(int, double, float) = widcc_rt_lookup(jit->rt, "mix");
   int (*dcmp)(double, double) = widcc_rt_lookup(jit->rt, "dcmp");
   double (*ddiv)(double, double) = widcc_rt_lookup(jit->rt, "ddiv");
-  CHECK(dadd && fmul && mix && dcmp && ddiv);
+  double (*keepf)(double, float) = widcc_rt_lookup(jit->rt, "keepf");
+  CHECK(dadd && fmul && mix && dcmp && ddiv && keepf);
 
   CHECK(dadd(1.5, 2.25) == 3.75);
   CHECK(fmul(2.0f, 3.5f) == 7.0f);
   CHECK(mix(1, 0.5, 0.25f) == 1.75);
   CHECK(dcmp(1.0, 2.0) == -1 && dcmp(2.0, 1.0) == 1 && dcmp(1.0, 1.0) == 0);
   CHECK(ddiv(7.0, 2.0) == 3.5);
+  CHECK(keepf(1.5, 2.0f) == 5.5);
 }
 
 static void test_host_symbols(JIT *jit) {
@@ -756,16 +770,23 @@ static void test_int64_semantics(JIT *jit) {
 #if HOST_64BIT
   CHECK_COMPILE(jit, "int64.c",
     "long long wide_mul(long long a, long long b) { return a * b; }\n"
-    "long long wide_divmod(long long a, long long b) { return a / b + a % b; }\n");
+    "long long wide_divmod(long long a, long long b) { return a / b + a % b; }\n"
+    "long long wide_cond_ctx(int c) {\n"
+    "  long long a = 0x100000000LL;\n"
+    "  return a + (c ? 1 : 2);\n"
+    "}\n");
 
   long long (*wide_mul)(long long, long long) = widcc_rt_lookup(jit->rt, "wide_mul");
   long long (*wide_divmod)(long long, long long) =
       widcc_rt_lookup(jit->rt, "wide_divmod");
-  CHECK(wide_mul && wide_divmod);
+  long long (*wide_cond_ctx)(int) = widcc_rt_lookup(jit->rt, "wide_cond_ctx");
+  CHECK(wide_mul && wide_divmod && wide_cond_ctx);
 
   // 64-bit operands still use the wide path.
   CHECK(wide_mul(3037000499LL, 3LL) == 3037000499LL * 3LL);
   CHECK(wide_divmod(10000000000LL, 7LL) == 10000000000LL / 7LL + 10000000000LL % 7LL);
+  CHECK(wide_cond_ctx(1) == 0x100000001LL);
+  CHECK(wide_cond_ctx(0) == 0x100000002LL);
 #else
   // i64 parameters/returns are still a compile-time error on a 32-bit host.
   const char *err = widcc_rt_load_code(jit->rt, "int64_param.c",
@@ -829,6 +850,11 @@ static void test_int64_semantics(JIT *jit) {
     "  long long x = c ? 0x100000000 : 0x2;\n"
     "  return (int)(x >> 32);\n"
     "}\n"
+    "int i64_cond_ctx(int c) {\n"
+    "  long long a = 0x100000000;\n"
+    "  long long r = a + (c ? 1 : 2);\n"
+    "  return (int)(r >> 32) * 10 + (int)r;\n"
+    "}\n"
     "int i64_trunc(void) {\n"
     "  long long x = 0x123456789;\n"
     "  return (int)x;\n"
@@ -858,6 +884,7 @@ static void test_int64_semantics(JIT *jit) {
   void (*i64_assign)(void) = widcc_rt_lookup(jit->rt, "i64_assign");
   int (*i64_logic)(void) = widcc_rt_lookup(jit->rt, "i64_logic");
   int (*i64_cond)(int) = widcc_rt_lookup(jit->rt, "i64_cond");
+  int (*i64_cond_ctx)(int) = widcc_rt_lookup(jit->rt, "i64_cond_ctx");
   int (*i64_trunc)(void) = widcc_rt_lookup(jit->rt, "i64_trunc");
   int (*i64_from_int)(int) = widcc_rt_lookup(jit->rt, "i64_from_int");
   double (*i64_to_d)(void) = widcc_rt_lookup(jit->rt, "i64_to_d");
@@ -909,6 +936,10 @@ static void test_int64_semantics(JIT *jit) {
   CHECK(i64_logic() == 5);
   CHECK(i64_cond(1) == 1);
   CHECK(i64_cond(0) == 0);
+  // The ternary sits inside a larger 64-bit expression, so the value on the
+  // left must survive whichever arm runs.
+  CHECK(i64_cond_ctx(1) == 11);
+  CHECK(i64_cond_ctx(0) == 12);
   CHECK(i64_trunc() == 0x23456789);
   CHECK(i64_from_int(-1) == -1);
   CHECK(i64_from_int(5) == 0);
@@ -1089,6 +1120,740 @@ static void test_va_list(JIT *jit) {
   CHECK(calld() > 3.49f && calld() < 3.51f);
 }
 
+// --- Broader language coverage -------------------------------------------
+//
+// These groups cover constructs the earlier tests do not: operator side
+// effects, integer conversions, aggregates and static initializers,
+// indirect calls, statement-level control flow, the preprocessor, loop
+// conditions with side effects, ternaries inside larger expressions, very
+// wide expressions, spill-heavy frames and the diagnostics of constructs
+// the backend rejects.
+
+static void test_operators(JIT *jit) {
+  CHECK_COMPILE(jit, "ops.c",
+    "int compound(int a) {\n"
+    "  a += 5; a -= 3; a *= 2; a /= 7; a %= 5;\n"
+    "  int b = 0xF0; b &= 0x3C; b |= 1; b ^= 0x7; b <<= 2; b >>= 1;\n"
+    "  return a * 1000 + b;\n"
+    "}\n"
+    "double dcompound(double d) {\n"
+    "  d += 2.25; d *= 2.0; d -= 0.5; d /= 2.0; return d;\n"
+    "}\n"
+    "int incdec(void) {\n"
+    "  int i = 5; int a = i++; int b = ++i; int c = i--; int d = --i;\n"
+    "  char ch = 127; ch++;\n"
+    "  double x = 1.5; double y = x++; double z = ++x;\n"
+    "  return a * 100000 + b * 10000 + c * 1000 + d * 100 + ch\n"
+    "       + (int)((x + y + z) * 10);\n"
+    "}\n"
+    "int ptr_incdec(void) {\n"
+    "  int a[3]; a[0] = 1; a[1] = 2; a[2] = 3;\n"
+    "  int *p = a; int v = *p++; int w = *++p;\n"
+    "  return v * 10 + w;\n"
+    "}\n"
+    "int comma(int x) { return (x, x + 1, x * 4); }\n"
+    "int assign_value(void) {\n"
+    "  int a, b, c; a = b = c = 4; int x; int y = (x = 7) + x;\n"
+    "  return a + b + c + x + y;\n"
+    "}\n");
+
+  int (*compound)(int) = widcc_rt_lookup(jit->rt, "compound");
+  double (*dcompound)(double) = widcc_rt_lookup(jit->rt, "dcompound");
+  int (*incdec)(void) = widcc_rt_lookup(jit->rt, "incdec");
+  int (*ptr_incdec)(void) = widcc_rt_lookup(jit->rt, "ptr_incdec");
+  int (*comma)(int) = widcc_rt_lookup(jit->rt, "comma");
+  int (*assign_value)(void) = widcc_rt_lookup(jit->rt, "assign_value");
+  CHECK(compound && dcompound && incdec && ptr_incdec && comma && assign_value);
+
+  CHECK(compound(10) == 3 * 1000 + 108);
+  CHECK(dcompound(1.5) == 3.5);
+  // a=5 b=7 c=7 d=5, char wraps to -128, x=3.5 y=1.5 z=3.5.
+  CHECK(incdec() == 500000 + 70000 + 7000 + 500 - 128 + 85);
+  CHECK(ptr_incdec() == 13);
+  CHECK(comma(3) == 12);
+  CHECK(assign_value() == 33);
+}
+
+static void test_conversions(JIT *jit) {
+  CHECK_COMPILE(jit, "conv.c",
+    "int cast_double(double d) { return (int)d; }\n"
+    "int cast_char(int x) { char c = x; return c; }\n"
+    "int cast_short(int x) { short s = x; return s; }\n"
+    "int cast_ushort(int x) { unsigned short u = x; return u; }\n"
+    "int cast_unsigned(void) { unsigned u = (unsigned)-1; return u == 0xFFFFFFFFu; }\n"
+    "int cast_bool(double d) { _Bool b = d; return b; }\n"
+    "int cast_float_int(void) { float f = 3.99f; return (int)f; }\n"
+    "int cast_rounding(double d) { return (int)(d * 100.0); }\n"
+    "int promote_short(short s, unsigned short u) { return s * 2 + (u & 0xFF); }\n"
+    "int widen_unsigned(void) {\n"
+    "  unsigned u = 0xFFFFFFF0u;\n"
+    "  long long w = u;\n"
+    "  return u == 0xFFFFFFF0u && w == 0xFFFFFFF0ll;\n"
+    "}\n"
+    "int trunc_long(void) { long long w = 0x123456789LL; return (int)w; }\n");
+
+  int (*cast_double)(double) = widcc_rt_lookup(jit->rt, "cast_double");
+  int (*cast_char)(int) = widcc_rt_lookup(jit->rt, "cast_char");
+  int (*cast_short)(int) = widcc_rt_lookup(jit->rt, "cast_short");
+  int (*cast_ushort)(int) = widcc_rt_lookup(jit->rt, "cast_ushort");
+  int (*cast_unsigned)(void) = widcc_rt_lookup(jit->rt, "cast_unsigned");
+  int (*cast_bool)(double) = widcc_rt_lookup(jit->rt, "cast_bool");
+  int (*cast_float_int)(void) = widcc_rt_lookup(jit->rt, "cast_float_int");
+  int (*cast_rounding)(double) = widcc_rt_lookup(jit->rt, "cast_rounding");
+  int (*promote_short)(short, unsigned short) =
+      widcc_rt_lookup(jit->rt, "promote_short");
+  int (*widen_unsigned)(void) = widcc_rt_lookup(jit->rt, "widen_unsigned");
+  int (*trunc_long)(void) = widcc_rt_lookup(jit->rt, "trunc_long");
+  CHECK(cast_double && cast_char && cast_short && cast_ushort);
+  CHECK(cast_unsigned && cast_bool && cast_float_int && cast_rounding);
+  CHECK(promote_short && widen_unsigned && trunc_long);
+
+  // Truncation and conversion results are compared against the host's own
+  // semantics rather than restated here.
+  CHECK(cast_double(-7.9) == (int)-7.9);
+  CHECK(cast_char(300) == (char)300);
+  CHECK(cast_short(70000) == (short)70000);
+  CHECK(cast_ushort(70000) == (unsigned short)70000);
+  CHECK(cast_unsigned() == 1);
+  CHECK(cast_bool(0.5) == 1 && cast_bool(0.0) == 0 && cast_bool(-2.0) == 1);
+  CHECK(cast_float_int() == (int)3.99f);
+  CHECK(cast_rounding(-2.75) == (int)(-2.75 * 100.0));
+  CHECK(promote_short((short)-300, (unsigned short)70000) ==
+        (short)-300 * 2 + ((unsigned short)70000 & 0xFF));
+  CHECK(widen_unsigned() == 1);
+  CHECK(trunc_long() == (int)0x123456789LL);
+}
+
+static void test_aggregates(JIT *jit) {
+  CHECK_COMPILE(jit, "agg.c",
+    "union U { int i; float f; unsigned char b[4]; };\n"
+    "enum E { A, B = 5, C, D = -2 };\n"
+    "struct In { int a; char b[4]; };\n"
+    "struct Out { struct In in; int c; struct In *p; };\n"
+    "struct P { int x, y, z; };\n"
+    "struct Row { int v[3]; };\n"
+    "struct Grid { struct Row rows[2]; };\n"
+    "int union_pun(void) {\n"
+    "  union U u; u.i = 0; u.b[0] = 1; u.b[1] = 2; return u.i;\n"
+    "}\n"
+    "int enum_vals(void) { return A * 1000 + B * 100 + C * 10 + D; }\n"
+    "int nested(void) {\n"
+    "  struct Out o; o.in.a = 7; o.in.b[0] = 1; o.in.b[1] = 2;\n"
+    "  o.in.b[2] = 3; o.in.b[3] = 4; o.c = 9; o.p = &o.in;\n"
+    "  struct Out q = o; q.c = 10;\n"
+    "  return q.in.a + q.in.b[0] + q.in.b[1] + q.in.b[2] + q.in.b[3]\n"
+    "       + q.c + q.p->a + o.c;\n"
+    "}\n"
+    "int designated(void) {\n"
+    "  int a[5] = {[1] = 10, [3] = 30}; struct P p = {.y = 2, .z = 3};\n"
+    "  int b[] = {1, 2, 3, 4}; struct P c = {7};\n"
+    "  return a[0] + a[1] + a[2] + a[3] + p.x + p.y + p.z + b[3] + c.x + c.y;\n"
+    "}\n"
+    "int layout(void) {\n"
+    "  int off = (int)((char *)&((struct P *)0)->y - (char *)0);\n"
+    "  return off + _Alignof(struct P) + (int)sizeof(struct P);\n"
+    "}\n"
+    "int compound_literal(void) {\n"
+    "  struct P p = (struct P){3, 4};\n"
+    "  int *a = (int[]){5, 6, 7};\n"
+    "  return p.x + p.y + a[0] + a[1] + a[2];\n"
+    "}\n"
+    "int nested_array(void) {\n"
+    "  struct Grid g; struct Grid h;\n"
+    "  for (int i = 0; i < 2; i++)\n"
+    "    for (int j = 0; j < 3; j++) g.rows[i].v[j] = i * 3 + j;\n"
+    "  h = g;\n"
+    "  int s = 0;\n"
+    "  for (int i = 0; i < 2; i++)\n"
+    "    for (int j = 0; j < 3; j++) s += h.rows[i].v[j];\n"
+    "  return s;\n"
+    "}\n"
+    "int multi_array(void) {\n"
+    "  int m[3][4];\n"
+    "  for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++) m[i][j] = i * 4 + j;\n"
+    "  int (*row)[4] = m; int *flat = &m[0][0];\n"
+    "  return m[2][3] + row[1][2] + flat[5] + *(*(m + 1) + 1);\n"
+    "}\n");
+
+  int (*union_pun)(void) = widcc_rt_lookup(jit->rt, "union_pun");
+  int (*enum_vals)(void) = widcc_rt_lookup(jit->rt, "enum_vals");
+  int (*nested)(void) = widcc_rt_lookup(jit->rt, "nested");
+  int (*designated)(void) = widcc_rt_lookup(jit->rt, "designated");
+  int (*layout)(void) = widcc_rt_lookup(jit->rt, "layout");
+  int (*compound_literal)(void) = widcc_rt_lookup(jit->rt, "compound_literal");
+  int (*nested_array)(void) = widcc_rt_lookup(jit->rt, "nested_array");
+  int (*multi_array)(void) = widcc_rt_lookup(jit->rt, "multi_array");
+  CHECK(union_pun && enum_vals && nested && designated && layout);
+  CHECK(compound_literal && nested_array && multi_array);
+
+  union { int i; unsigned char b[4]; } pun;
+  pun.i = 0;
+  pun.b[0] = 1;
+  pun.b[1] = 2;
+  CHECK(union_pun() == pun.i); // the host's own byte order
+  CHECK(enum_vals() == 0 + 500 + 60 - 2);
+  CHECK(nested() == 7 + 1 + 2 + 3 + 4 + 10 + 7 + 9);
+  CHECK(designated() == 0 + 10 + 0 + 30 + 0 + 2 + 3 + 4 + 7 + 0);
+  CHECK(layout() == 4 + 4 + 12);
+  CHECK(compound_literal() == 3 + 4 + 5 + 6 + 7);
+  CHECK(nested_array() == 0 + 1 + 2 + 3 + 4 + 5);
+  CHECK(multi_array() == 11 + 6 + 5 + 5);
+}
+
+static void test_initializers(JIT *jit) {
+  // A static initializer may take the address of another global of the same
+  // unit, whichever order the objects are emitted in.
+  CHECK_COMPILE(jit, "init.c",
+    "int g = 7;\n"
+    "int *gp = &g;\n"
+    "int arr[3] = {1, 2, 3};\n"
+    "int *ap = &arr[1];\n"
+    "int *ap0 = arr;\n"
+    "char *names[3] = {\"aa\", \"bb\", \"cc\"};\n"
+    "struct Q { int a; int b[3]; char *s; };\n"
+    "struct Q gq = {4, {5, 6, 7}, \"hi\"};\n"
+    "char gs[] = \"abcd\";\n"
+    "int garr5[5] = {1, 2, 3};\n"
+    "int statics(void) {\n"
+    "  static int calls;\n"
+    "  static int tab[3] = {1, 2, 3};\n"
+    "  calls++;\n"
+    "  tab[0] += calls;\n"
+    "  return calls * 100 + tab[0];\n"
+    "}\n"
+    "int initializer_sum(void) {\n"
+    "  *gp += 1; *ap += 10;\n"
+    "  return g + arr[1] + gq.a + gq.b[2] + gq.s[1] + names[1][1]\n"
+    "       + gs[3] + garr5[2] + garr5[4] + (ap0 == arr);\n"
+    "}\n");
+
+  int (*statics)(void) = widcc_rt_lookup(jit->rt, "statics");
+  int (*initializer_sum)(void) = widcc_rt_lookup(jit->rt, "initializer_sum");
+  CHECK(statics && initializer_sum);
+  CHECK(statics() == 102);
+  CHECK(statics() == 204);
+  // g=8, arr[1]=12, gq.a=4, gq.b[2]=7, 'i', 'b', gs[3]='d',
+  // garr5[2]=3, garr5[4]=0, ap0==arr.
+  CHECK(initializer_sum() == 8 + 12 + 4 + 7 + 'i' + 'b' + 'd' + 3 + 0 + 1);
+}
+
+static int host_cb(int a, int b) { return a * 100 + b; }
+static int host_apply(int (*fn)(int, int), int a, int b) { return fn(a, b); }
+
+static void test_indirect_calls(JIT *jit) {
+  CHECK(widcc_rt_add_func(jit->rt, "host_cb", (void *)host_cb) == NULL);
+  CHECK(widcc_rt_add_func(jit->rt, "host_apply", (void *)host_apply) == NULL);
+
+  CHECK_COMPILE(jit, "fnptr.c",
+    "typedef int (*Bin)(int, int);\n"
+    "int add(int a, int b) { return a + b; }\n"
+    "int sub(int a, int b) { return a - b; }\n"
+    "Bin pick(int which) { return which ? sub : add; }\n"
+    "struct Ops { Bin fn; int bias; };\n"
+    "static int sq(int x) { return x * x; }\n"
+    "static int twice(int (*f)(int), int x) { return f(f(x)); }\n"
+    "int table(void) {\n"
+    "  Bin tab[2]; tab[0] = add; tab[1] = sub;\n"
+    "  struct Ops o; o.fn = tab[0]; o.bias = 100;\n"
+    "  int (*raw)(int, int) = pick(1);\n"
+    "  return tab[0](3, 4) + tab[1](3, 4) + o.fn(5, 6) + o.bias\n"
+    "       + raw(10, 3) + pick(0)(1, 1);\n"
+    "}\n"
+    "int static_ptr(void) { return twice(sq, 3); }\n"
+    "int cmp_ptrs(void) {\n"
+    "  int (*p)(int, int) = add; int (*q)(int, int) = sub;\n"
+    "  int r = (p == add) + (q != add) + (p != q);\n"
+    "  if (p) r += 10;\n"
+    "  return r + p(2, 3);\n"
+    "}\n"
+    "int host_cb(int, int);\n"
+    "int host_apply(int (*)(int, int), int, int);\n"
+    "int call_host_through_ptr(void) {\n"
+    "  return host_apply(host_cb, 4, 5);\n"
+    "}\n"
+    "int pass_ptr_out(int (*fn)(int, int), int a) { return fn(a, a + 1); }\n");
+
+  int (*table)(void) = widcc_rt_lookup(jit->rt, "table");
+  int (*static_ptr)(void) = widcc_rt_lookup(jit->rt, "static_ptr");
+  int (*cmp_ptrs)(void) = widcc_rt_lookup(jit->rt, "cmp_ptrs");
+  int (*call_host_through_ptr)(void) =
+      widcc_rt_lookup(jit->rt, "call_host_through_ptr");
+  int (*pass_ptr_out)(int (*)(int, int), int) =
+      widcc_rt_lookup(jit->rt, "pass_ptr_out");
+  CHECK(table && static_ptr && cmp_ptrs && call_host_through_ptr && pass_ptr_out);
+
+  CHECK(table() == 7 - 1 + 11 + 100 + 7 + 2);
+  CHECK(static_ptr() == 81);
+  CHECK(cmp_ptrs() == 3 + 10 + 5);
+  // A host callback reaches the JIT as a plain function pointer and the JIT
+  // passes one of its own back out to the host.
+  CHECK(call_host_through_ptr() == 405);
+  CHECK(pass_ptr_out(host_cb, 6) == 607);
+}
+
+static void test_control_flow(JIT *jit) {
+  CHECK_COMPILE(jit, "flow.c",
+    "int fallthrough(void) {\n"
+    "  int r = 0;\n"
+    "  for (int i = 0; i < 5; i++) {\n"
+    "    switch (i) {\n"
+    "    case 0: r += 1;\n"
+    "    case 1: r += 10; break;\n"
+    "    case 2: continue;\n"
+    "    case 3: for (int j = 0; j < 3; j++) {\n"
+    "              if (j == 1) continue; r += 100; } break;\n"
+    "    default: r += 1000;\n"
+    "    }\n"
+    "    r += 1;\n"
+    "  }\n"
+    "  return r;\n"
+    "}\n"
+    "int goto_nested(void) {\n"
+    "  int r = 0, i = 0;\n"
+    "  for (int a = 0; a < 3; a++)\n"
+    "    for (int b = 0; b < 3; b++) {\n"
+    "      if (a == 1 && b == 1) goto out;\n"
+    "      r += a * 3 + b;\n"
+    "    }\n"
+    "out:\n"
+    "  r += 1000;\n"
+    "  i = 0;\n"
+    "again:\n"
+    "  if (i < 3) { r += i; i++; goto again; }\n"
+    "  return r;\n"
+    "}\n"
+    "int shadowing(void) {\n"
+    "  int x = 1, r = 0;\n"
+    "  { int x = 10; r += x; { int x = 100; r += x; } r += x; }\n"
+    "  r += x;\n"
+    "  for (int x = 0; x < 2; x++) r += x;\n"
+    "  r += x;\n"
+    "  return r * 1000 + x;\n"
+    "}\n"
+    "int for_comma(void) {\n"
+    "  int s = 0;\n"
+    "  for (int i = 0, j = 10; i < 10; i++, j--) s += i * j;\n"
+    "  return s;\n"
+    "}\n"
+    "int break_continue_deep(void) {\n"
+    "  int s = 0;\n"
+    "  for (int i = 0; i < 10; i++) {\n"
+    "    if (i % 3 == 0) continue;\n"
+    "    int j = 0;\n"
+    "    while (1) {\n"
+    "      if (j > i) break;\n"
+    "      j += 2;\n"
+    "      if (j == 4) { s += 1000; continue; }\n"
+    "      s += i * 10 + j;\n"
+    "      if (j > 6) break;\n"
+    "    }\n"
+    "  }\n"
+    "  return s;\n"
+    "}\n"
+    "int switch_values(int x) {\n"
+    "  switch (x) {\n"
+    "  case -5: return 1;\n"
+    "  case 0: return 2;\n"
+    "  case 1000000: return 3;\n"
+    "  case 2147483647: return 4;\n"
+    "  }\n"
+    "  return 0;\n"
+    "}\n"
+    "int returns_paths(int x) {\n"
+    "  if (x < 0) return -1;\n"
+    "  if (x == 0) return 0;\n"
+    "  for (int i = 0; i < x; i++) if (i == 5) return i * 100;\n"
+    "  return x * 7;\n"
+    "}\n");
+
+  int (*fallthrough)(void) = widcc_rt_lookup(jit->rt, "fallthrough");
+  int (*goto_nested)(void) = widcc_rt_lookup(jit->rt, "goto_nested");
+  int (*shadowing)(void) = widcc_rt_lookup(jit->rt, "shadowing");
+  int (*for_comma)(void) = widcc_rt_lookup(jit->rt, "for_comma");
+  int (*break_continue_deep)(void) =
+      widcc_rt_lookup(jit->rt, "break_continue_deep");
+  int (*switch_values)(int) = widcc_rt_lookup(jit->rt, "switch_values");
+  int (*returns_paths)(int) = widcc_rt_lookup(jit->rt, "returns_paths");
+  CHECK(fallthrough && goto_nested && shadowing && for_comma);
+  CHECK(break_continue_deep && switch_values && returns_paths);
+
+  CHECK(fallthrough() == 1225);
+  CHECK(goto_nested() == 1009);
+  CHECK(shadowing() == 123 * 1000 + 1);
+  CHECK(for_comma() == 165); // sum i * (10 - i) for i in 0..9
+  CHECK(break_continue_deep() == 5712);
+  CHECK(switch_values(-5) == 1 && switch_values(0) == 2);
+  CHECK(switch_values(1000000) == 3 && switch_values(2147483647) == 4);
+  CHECK(switch_values(7) == 0);
+  CHECK(returns_paths(-5) == -1 && returns_paths(0) == 0);
+  CHECK(returns_paths(8) == 500 && returns_paths(3) == 21);
+}
+
+static void test_preprocessor(JIT *jit) {
+  CHECK_COMPILE(jit, "pp.c",
+    "#define SQ(x) ((x) * (x))\n"
+    "#define CAT(a, b) a##b\n"
+    "#define STR(x) #x\n"
+    "#define VAL 3\n"
+    "#if VAL > 5\n"
+    "#define PICK 1\n"
+    "#elif VAL > 2\n"
+    "#define PICK 2\n"
+    "#else\n"
+    "#define PICK 3\n"
+    "#endif\n"
+    "#undef VAL\n"
+    "#define VAL 7\n"
+    "int probe(void) {\n"
+    "  int CAT(v, 1) = SQ(VAL);\n"
+    "  int n = 0;\n"
+    "  if (STR(abc)[0] == 'a') n = 1;\n"
+    "  return v1 * 10 + PICK + n;\n"
+    "}\n"
+    "int counter_macro(void) {\n"
+    "  return __COUNTER__ * 10 + __COUNTER__;\n"
+    "}\n"
+    "int line_macro(void) { return __LINE__ > 0; }\n");
+
+  int (*probe)(void) = widcc_rt_lookup(jit->rt, "probe");
+  int (*counter_macro)(void) = widcc_rt_lookup(jit->rt, "counter_macro");
+  int (*line_macro)(void) = widcc_rt_lookup(jit->rt, "line_macro");
+  CHECK(probe && counter_macro && line_macro);
+  CHECK(probe() == 49 * 10 + 2 + 1);
+  CHECK(counter_macro() == 1); // serials 0 and 1
+  CHECK(line_macro() == 1);
+}
+
+// Loop conditions with side effects are emitted once, above the body, so
+// the back edge has to re-enter the test instead of jumping into the body.
+static void test_loop_conditions(JIT *jit) {
+  CHECK_COMPILE(jit, "loops2.c",
+    "int postdec(int n) { int s = 0; while (n-- > 0) s += n; return s; }\n"
+    "int postdec_plain(int n) { int c = 0; while (n--) c++; return c * 10 + n; }\n"
+    "int postinc_for(int n) { int c = 0; for (; c++ < n; ) { } return c; }\n"
+    "int comma_cond(int n) { int i = 0, s = 0; while ((i += 2) <= n) s += i; return s; }\n"
+    "int assign_cond(int n) {\n"
+    "  int v = 0, c = 0;\n"
+    "  while ((v = n - c) > 0) c++;\n"
+    "  return c * 10 + v;\n"
+    "}\n"
+    "int next(int *p) { return (*p)++; }\n"
+    "int call_cond(void) {\n"
+    "  int x = 0, s = 0;\n"
+    "  while (next(&x) < 4) s += x;\n"
+    "  return s * 10 + x;\n"
+    "}\n"
+    "int ternary_cond(int n) {\n"
+    "  int i = 0, s = 0;\n"
+    "  while (i < n ? (i++, 1) : 0) s++;\n"
+    "  return s * 10 + i;\n"
+    "}\n"
+    "int dowhile_post(int n) { int c = 0; do { c++; } while (n-- > 0); return c * 100 + n; }\n"
+    "int nested_call_cond(int n) {\n"
+    "  int s = 0;\n"
+    "  for (int i = 0; i < n; i++) {\n"
+    "    int j = 0;\n"
+    "    while (next(&j) < 3) s += j;\n"
+    "  }\n"
+    "  return s;\n"
+    "}\n");
+
+  int (*postdec)(int) = widcc_rt_lookup(jit->rt, "postdec");
+  int (*postdec_plain)(int) = widcc_rt_lookup(jit->rt, "postdec_plain");
+  int (*postinc_for)(int) = widcc_rt_lookup(jit->rt, "postinc_for");
+  int (*comma_cond)(int) = widcc_rt_lookup(jit->rt, "comma_cond");
+  int (*assign_cond)(int) = widcc_rt_lookup(jit->rt, "assign_cond");
+  int (*call_cond)(void) = widcc_rt_lookup(jit->rt, "call_cond");
+  int (*ternary_cond)(int) = widcc_rt_lookup(jit->rt, "ternary_cond");
+  int (*dowhile_post)(int) = widcc_rt_lookup(jit->rt, "dowhile_post");
+  int (*nested_call_cond)(int) = widcc_rt_lookup(jit->rt, "nested_call_cond");
+  CHECK(postdec && postdec_plain && postinc_for && comma_cond && assign_cond);
+  CHECK(call_cond && ternary_cond && dowhile_post && nested_call_cond);
+
+  // Reference values computed with the same loop on the host.
+  for (int n = 0; n <= 6; n++) {
+    int s = 0, m = n;
+    while (m-- > 0) s += m;
+    CHECK(postdec(n) == s);
+
+    int c = 0, k = n;
+    while (k--) c++;
+    CHECK(postdec_plain(n) == c * 10 + k);
+
+    int c2 = 0;
+    for (; c2++ < n; ) { }
+    CHECK(postinc_for(n) == c2);
+
+    int i = 0, s2 = 0;
+    while ((i += 2) <= n) s2 += i;
+    CHECK(comma_cond(n) == s2);
+
+    int v = 0, c3 = 0;
+    while ((v = n - c3) > 0) c3++;
+    CHECK(assign_cond(n) == c3 * 10 + v);
+  }
+
+  CHECK(call_cond() == 10 * 10 + 5); // 1+2+3+4, x ends at 5
+  CHECK(ternary_cond(5) == 5 * 10 + 5);
+  CHECK(dowhile_post(3) == 4 * 100 - 1);
+  CHECK(nested_call_cond(2) == 2 * (1 + 2 + 3));
+}
+
+// A ternary nested inside a larger expression must leave enclosing values
+// intact on both arms; the spill stores belong before the branch.
+static void test_ternary_expressions(JIT *jit) {
+  CHECK_COMPILE(jit, "ternary.c",
+    "int tern_ge(int a, int b) { return a >= (b ? b : 7); }\n"
+    "int tern_in_expr(int a, int b) {\n"
+    "  return (a ? a + 1 : b * 3) + (b ? 100 : 200) * 2 + (a ? 1 : 0);\n"
+    "}\n"
+    "int tern_ptr(int c) {\n"
+    "  int a = 11, b = 22;\n"
+    "  int *p = c ? &a : &b;\n"
+    "  int arr[2]; arr[0] = 5; arr[1] = 6;\n"
+    "  int *q = c ? arr : arr + 1;\n"
+    "  return *p + *q;\n"
+    "}\n"
+    "int tern_chain(int n) {\n"
+    "  return n < 0 ? -1 : (n == 0 ? 0 : (n < 10 ? n * 10 : n * 100));\n"
+    "}\n"
+    "int tern_assign(int c) { int x = 0; x = c ? 10 : 20; return x; }\n");
+
+  int (*tern_ge)(int, int) = widcc_rt_lookup(jit->rt, "tern_ge");
+  int (*tern_in_expr)(int, int) = widcc_rt_lookup(jit->rt, "tern_in_expr");
+  int (*tern_ptr)(int) = widcc_rt_lookup(jit->rt, "tern_ptr");
+  int (*tern_chain)(int) = widcc_rt_lookup(jit->rt, "tern_chain");
+  int (*tern_assign)(int) = widcc_rt_lookup(jit->rt, "tern_assign");
+  CHECK(tern_ge && tern_in_expr && tern_ptr && tern_chain && tern_assign);
+
+  CHECK(tern_ge(1, 0) == 0);  // 1 >= 7 is false
+  CHECK(tern_ge(9, 0) == 1);
+  CHECK(tern_ge(1, 1) == 1);  // b is 1, so compare against b
+  CHECK(tern_in_expr(2, 0) == 3 + 200 * 2 + 1);
+  CHECK(tern_in_expr(0, 5) == 15 + 100 * 2 + 0);
+  CHECK(tern_ptr(1) == 11 + 5);
+  CHECK(tern_ptr(0) == 22 + 6);
+  CHECK(tern_chain(-1) == -1 && tern_chain(0) == 0);
+  CHECK(tern_chain(3) == 30 && tern_chain(30) == 3000);
+  CHECK(tern_assign(1) == 10 && tern_assign(0) == 20);
+}
+
+// A wide left-leaning expression tree used to make the value-stack depth
+// estimation exponential; it must compile in linear time and be correct.
+static void test_wide_expressions(JIT *jit) {
+  char src[4096];
+  int n = 0;
+  n += snprintf(src + n, sizeof src - (size_t)n,
+                "int wide_add(void) { int a = 1; return ");
+  for (int i = 0; i < 40; i++)
+    n += snprintf(src + n, sizeof src - (size_t)n, i ? "+a" : "a");
+  n += snprintf(src + n, sizeof src - (size_t)n, "; }\nint wide_mixed(void) { int a = 1; return ");
+  for (int i = 0; i < 24; i++)
+    n += snprintf(src + n, sizeof src - (size_t)n, i ? "+a" : "a");
+  for (int i = 0; i < 24; i++)
+    n += snprintf(src + n, sizeof src - (size_t)n, "+a*a");
+  n += snprintf(src + n, sizeof src - (size_t)n,
+                "; }\nint deep_parens(void) { int a = 7; return ");
+  for (int i = 0; i < 100; i++)
+    n += snprintf(src + n, sizeof src - (size_t)n, "(");
+  n += snprintf(src + n, sizeof src - (size_t)n, "a");
+  for (int i = 0; i < 100; i++)
+    n += snprintf(src + n, sizeof src - (size_t)n, ")");
+  snprintf(src + n, sizeof src - (size_t)n, "; }\n");
+
+  CHECK_COMPILE(jit, "wide.c", src);
+  int (*wide_add)(void) = widcc_rt_lookup(jit->rt, "wide_add");
+  int (*wide_mixed)(void) = widcc_rt_lookup(jit->rt, "wide_mixed");
+  int (*deep_parens)(void) = widcc_rt_lookup(jit->rt, "deep_parens");
+  CHECK(wide_add && wide_mixed && deep_parens);
+  CHECK(wide_add() == 40);
+  CHECK(wide_mixed() == 24 + 24);
+  CHECK(deep_parens() == 7);
+}
+
+// Every local has to survive a loop that also calls out, which forces the
+// register allocator through its spill paths.
+static void test_many_locals(JIT *jit) {
+  CHECK_COMPILE(jit, "locals.c",
+    "int add(int a, int b) { return a + b; }\n"
+    "int twelve(void) {\n"
+    "  int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;\n"
+    "  int g = 7, h = 8, i = 9, j = 10, k = 11, l = 12;\n"
+    "  int s = 0;\n"
+    "  for (int n = 0; n < 3; n++) {\n"
+    "    s += a + b + c + d + e + f + g + h + i + j + k + l;\n"
+    "    a++; b++; c++; d++; e++; f++; g++; h++; i++; j++; k++; l++;\n"
+    "  }\n"
+    "  return s + a + b + c + d + e + f + g + h + i + j + k + l;\n"
+    "}\n"
+    "int with_calls(void) {\n"
+    "  int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9, j = 10;\n"
+    "  for (int n = 0; n < 3; n++) {\n"
+    "    a = add(a, 1); b = add(b, 2); c = add(c, 3); d = add(d, 4);\n"
+    "    e = add(e, 5); f = add(f, 6); g = add(g, 7); h = add(h, 8);\n"
+    "    i = add(i, 9); j = add(j, 10);\n"
+    "  }\n"
+    "  return a * 1000 + b * 100 + c * 10 + d + e + f + g + h + i + j;\n"
+    "}\n"
+    "int twenty(void) {\n"
+    "  int v0=1,v1=2,v2=3,v3=4,v4=5,v5=6,v6=7,v7=8,v8=9,v9=10;\n"
+    "  int w0=11,w1=12,w2=13,w3=14,w4=15,w5=16,w6=17,w7=18,w8=19,w9=20;\n"
+    "  return v0+v1+v2+v3+v4+v5+v6+v7+v8+v9\n"
+    "       + w0+w1+w2+w3+w4+w5+w6+w7+w8+w9;\n"
+    "}\n"
+    "int six_params(int a, int b, int c, int d, int e, int f) {\n"
+    "  return a + b + c + d + e + f;\n"
+    "}\n"
+    "int params_and_locals(void) {\n"
+    "  int x1=1,x2=2,x3=3,x4=4,x5=5,x6=6,x7=7,x8=8;\n"
+    "  return six_params(x1,x2,x3,x4,x5,x6) + x7 * 10 + x8;\n"
+    "}\n"
+    "int twelve_params(int a,int b,int c,int d,int e,int f,\n"
+    "                  int g,int h,int i,int j,int k,int l) {\n"
+    "  return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9+j*10+k*11+l*12;\n"
+    "}\n");
+
+  int (*twelve)(void) = widcc_rt_lookup(jit->rt, "twelve");
+  int (*with_calls)(void) = widcc_rt_lookup(jit->rt, "with_calls");
+  int (*twenty)(void) = widcc_rt_lookup(jit->rt, "twenty");
+  int (*params_and_locals)(void) = widcc_rt_lookup(jit->rt, "params_and_locals");
+  // Twelve parameters put this function on the Block ABI.
+  int (*twelve_params)(void *, intptr_t) =
+      widcc_rt_lookup(jit->rt, "twelve_params");
+  CHECK(twelve && with_calls && twenty && params_and_locals && twelve_params);
+
+  // The same loops on the host.
+  {
+    int a = 1, b = 2, c = 3, d = 4, e = 5, f = 6;
+    int g = 7, h = 8, i = 9, j = 10, k = 11, l = 12;
+    int s = 0;
+    for (int n = 0; n < 3; n++) {
+      s += a + b + c + d + e + f + g + h + i + j + k + l;
+      a++; b++; c++; d++; e++; f++; g++; h++; i++; j++; k++; l++;
+    }
+    CHECK(twelve() == s + a + b + c + d + e + f + g + h + i + j + k + l);
+
+    int a2 = 1, b2 = 2, c2 = 3, d2 = 4, e2 = 5;
+    int f2 = 6, g2 = 7, h2 = 8, i2 = 9, j2 = 10;
+    for (int n = 0; n < 3; n++) {
+      a2 += 1; b2 += 2; c2 += 3; d2 += 4; e2 += 5;
+      f2 += 6; g2 += 7; h2 += 8; i2 += 9; j2 += 10;
+    }
+    CHECK(with_calls() == a2 * 1000 + b2 * 100 + c2 * 10 + d2 +
+                             e2 + f2 + g2 + h2 + i2 + j2);
+  }
+  CHECK(twenty() == 210);
+  CHECK(params_and_locals() == 21 + 70 + 8);
+  long long args12[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  CHECK(twelve_params(args12, 12) == 650);
+}
+
+// Float parameters, float returns and the Block ABI with mixed classes.
+static void test_float_abi(JIT *jit) {
+  CHECK_COMPILE(jit, "fabi.c",
+    "double four(double a, double b, double c, double d) {\n"
+    "  return a + b * 2 + c * 3 + d * 4;\n"
+    "}\n"
+    "double five(double a, double b, double c, double d, double e) {\n"
+    "  return a + b * 2 + c * 3 + d * 4 + e * 5;\n"
+    "}\n"
+    "double mixed(int a, double b, int c, double d) {\n"
+    "  return a + b * 2 + c * 3 + d * 4;\n"
+    "}\n"
+    "double paths(int x) { return x > 0 ? x * 1.5 : -x * 0.5; }\n"
+    "int nan_cmp(double a, double b) {\n"
+    "  return (a < b) + (a <= b) * 2 + (a > b) * 4 + (a >= b) * 8\n"
+    "       + (a == b) * 16 + (a != b) * 32;\n"
+    "}\n"
+    "int d2i(double d) { return (int)d; }\n"
+    "double i2d(int i, unsigned u) { return i * 0.5 + u * 0.25; }\n"
+    "struct V { double x; float y; };\n"
+    "double struct_arr(void) {\n"
+    "  struct V vs[3];\n"
+    "  for (int i = 0; i < 3; i++) { vs[i].x = i * 1.5; vs[i].y = i * 0.5f; }\n"
+    "  struct V t = vs[2];\n"
+    "  return t.x + t.y + vs[0].x + vs[1].y;\n"
+    "}\n");
+
+  double (*four)(double, double, double, double) =
+      widcc_rt_lookup(jit->rt, "four");
+  double (*five)(void *, intptr_t) = widcc_rt_lookup(jit->rt, "five");
+  double (*mixed)(int, double, int, double) =
+      widcc_rt_lookup(jit->rt, "mixed");
+  double (*paths)(int) = widcc_rt_lookup(jit->rt, "paths");
+  int (*nan_cmp)(double, double) = widcc_rt_lookup(jit->rt, "nan_cmp");
+  int (*d2i)(double) = widcc_rt_lookup(jit->rt, "d2i");
+  double (*i2d)(int, unsigned) = widcc_rt_lookup(jit->rt, "i2d");
+  double (*struct_arr)(void) = widcc_rt_lookup(jit->rt, "struct_arr");
+  CHECK(four && five && mixed && paths && nan_cmp && d2i && i2d && struct_arr);
+
+  CHECK(four(1.5, 2.5, 3.5, 4.5) == 35.0);
+  CHECK(mixed(1, 2.5, 3, 4.5) == 33.0);
+  CHECK(paths(3) == 4.5 && paths(-3) == 1.5);
+  CHECK(d2i(-7.9) == -7);
+  CHECK(i2d(-4, 8u) == -2.0 + 2.0);
+  CHECK(struct_arr() == 4.5);
+
+  // NaN is unordered: it is not less, equal or greater than anything, so
+  // only != is true.
+  CHECK(nan_cmp(1.0, 2.0) == 1 + 2 + 32);
+  CHECK(nan_cmp(2.0, 1.0) == 4 + 8 + 32);
+  CHECK(nan_cmp(1.0, 1.0) == 2 + 8 + 16);
+  double nan = 0.0 / 0.0;
+  CHECK(nan != nan);
+  CHECK(nan_cmp(nan, 1.0) == 32);
+  CHECK(nan_cmp(1.0, nan) == 32);
+
+  // Block ABI: five doubles arrive through the argument block.
+  union { double d; long long w; } a, b, c, d, e;
+  a.d = 1.0; b.d = 2.0; c.d = 3.0; d.d = 4.0; e.d = 5.0;
+  long long args[5] = {a.w, b.w, c.w, d.w, e.w};
+  CHECK(five(args, 5) == 55.0);
+}
+
+// Unsupported constructs must be rejected with a diagnostic, and the runtime
+// must stay usable afterwards.
+static void test_unsupported_diagnostics(JIT *jit) {
+  static const struct {
+    const char *name;
+    const char *src;
+    const char *needle;
+  } bad[] = {
+    {"bad_bitfield.c",
+     "struct B { int a : 3; };\nint f(void) { struct B b; b.a = 1; return b.a; }\n",
+     "bitfield"},
+    {"bad_vla.c", "int f(int n) { int a[n]; a[0] = 1; return a[0]; }\n", "VLA"},
+    {"bad_struct_arg.c",
+     "struct P { int x; };\nint f(struct P p) { return p.x; }\n", "argument"},
+    {"bad_struct_ret.c",
+     "struct P { int x; };\nstruct P f(void) { struct P p; return p; }\n",
+     "return"},
+    {"bad_long_double.c", "long double f(void) { return 1.0L; }\n",
+     "long double"},
+    {"bad_alloca.c", "int f(void) { char *p = __builtin_alloca(8); return p != 0; }\n",
+     "alloca"},
+    {"bad_tls.c", "_Thread_local int t;\nint f(void) { return t; }\n", "TLS"},
+    {"bad_fmod.c", "double f(double a, double b) { return a % b; }\n", "%"},
+  };
+
+  for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    const char *err = widcc_rt_load_code(jit->rt, bad[i].name, bad[i].src, NULL);
+    if (!err) {
+      fprintf(stderr, "%s: expected a compile error\n", bad[i].name);
+      exit(1);
+    }
+    if (!strstr(err, bad[i].needle)) {
+      fprintf(stderr, "%s: unexpected diagnostic: %s\n", bad[i].name, err);
+      exit(1);
+    }
+  }
+
+  // A failed load leaves the runtime usable.
+  CHECK_COMPILE(jit, "after_bad.c", "int recovered(void) { return 5; }\n");
+  int (*recovered)(void) = widcc_rt_lookup(jit->rt, "recovered");
+  CHECK(recovered && recovered() == 5);
+}
+
 int main(void) {
   WidccRT *rt = widcc_rt_new();
   CHECK(rt != NULL);
@@ -1115,6 +1880,20 @@ int main(void) {
   test_platform_macros(&jit);
   test_many_args(&jit);
   test_va_list(&jit);
+
+  test_operators(&jit);
+  test_conversions(&jit);
+  test_aggregates(&jit);
+  test_initializers(&jit);
+  test_indirect_calls(&jit);
+  test_control_flow(&jit);
+  test_preprocessor(&jit);
+  test_loop_conditions(&jit);
+  test_ternary_expressions(&jit);
+  test_wide_expressions(&jit);
+  test_many_locals(&jit);
+  test_float_abi(&jit);
+  test_unsupported_diagnostics(&jit);
 
   test_runtime_release();
 
